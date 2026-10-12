@@ -18,6 +18,7 @@ const requireAdmin = (req, res, next) => {
 router.use(authenticateToken, requireAdmin);
 
 // 1. Fetch Aggregated Statistics & Settings
+// 1. Fetch Aggregated Statistics & Settings
 router.get('/data', async (req, res) => {
     try {
         const statsQuery = await db.query(`
@@ -50,8 +51,9 @@ router.get('/data', async (req, res) => {
             users: usersQuery.rows
         });
     } catch (err) {
-        console.error('[ADMIN DATA ERROR]', err);
-        res.status(500).json({ success: false, message: 'Server error retrieving admin data.' });
+        // CHANGED: This will now print the exact database error in your Coolify logs
+        console.error('[ADMIN DATA ERROR DETAILED]', err.message, err.detail);
+        res.status(500).json({ success: false, message: err.message });
     }
 });
 
