@@ -29,7 +29,7 @@ const sendWhatsAppOTP = async (phoneNumber, otpCode) => {
                     // ⚠️ REPLACE 'otp_verification' WITH YOUR EXACT TEMPLATE NAME FROM META WHATSAPP MANAGER
                     name: 'otp_verification',
                     language: {
-                        code: 'en_US' // Ensure this matches your approved template's language
+                        code: 'en' // Ensure this matches your approved template's language
                     },
                     components: [
                         {
