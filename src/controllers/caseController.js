@@ -1,4 +1,3 @@
-// src/controllers/caseController.js
 const db = require('../config/db');
 
 // Helper to format date to dd/mm/yyyy

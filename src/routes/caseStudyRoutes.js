@@ -6,10 +6,9 @@ const authenticateToken = require('../middleware/authenticateToken');
 // 1. IMPORT THE NEW SDK
 const { GoogleGenAI } = require('@google/genai');
 
-// 2. INITIALIZE WITH YOUR AQ KEY
+// 2. INITIALIZE WITH YOUR API KEY (Let the SDK handle the API version)
 const ai = new GoogleGenAI({
-    apiKey: process.env.GEMINI_API_KEY,
-    httpOptions: { apiVersion: 'v1' }
+    apiKey: process.env.GEMINI_API_KEY
 });
 
 // Ensure usage tracking table exists
@@ -96,12 +95,17 @@ router.post('/analyze', authenticateToken, async (req, res) => {
 You are a senior legal research assistant in Bangladesh analyzing legal documents (FIR, Charge Sheet, Court Order, Bail Petition, Seizure List, etc.).
 Review the provided document image(s) thoroughly and formulate your response strictly in ${promptLang}.
 
-Format your analysis using clear headings and bullet points:
-1. **Document Classification**: Identify the type of document (e.g., FIR under Penal Code / Special Tribunal, Interim Bail Order, etc.), case numbers, sections, parties, and court name if visible.
-2. **Core Summary**: Concise overview of the accusations, proceedings, or directions given in the document.
-3. **Strong Points**: Key strengths supporting the client's position or procedural merits.
-4. **Weak Points & Vulnerabilities**: Potential risks, procedural flaws (e.g., delay in FIR lodging, vague allegations, missing signatures), or legal obstacles.
-5. **Missing or Required Next Documents**: List any documents essential for the next court step (e.g., Certified Copy of Order Sheet, Medical Certificate, Seizure Memo, Bail Bond).
+CRITICAL FORMATTING RULES:
+1. Deliver your response PARAGRAPH BY PARAGRAPH with double line breaks between them.
+2. Use clear, UPPERCASE HEADINGS for each section (e.g., DOCUMENT CLASSIFICATION, CORE SUMMARY).
+3. DO NOT use markdown asterisks (**) or hashes (#). Use clean, plain text formatting that looks highly professional, lucrative, and easy to read on a mobile device.
+
+Format your analysis covering:
+- DOCUMENT CLASSIFICATION
+- CORE SUMMARY
+- STRONG POINTS
+- WEAK POINTS & VULNERABILITIES
+- MISSING OR REQUIRED NEXT DOCUMENTS
 
 Keep the language professional, practical, and tailored for advocate chambers in Bangladesh.
 `;
@@ -121,7 +125,7 @@ Keep the language professional, practical, and tailored for advocate chambers in
         let maxRetries = 2;
         for (let attempt = 0; attempt <= maxRetries; attempt++) {
             try {
-                // 3. NEW SDK SYNTAX FOR GENERATION
+                // CHANGED TO gemini-1.5-flash
                 result = await ai.models.generateContent({
                     model: 'gemini-3.8-flash',
                     contents: contents
@@ -138,8 +142,6 @@ Keep the language professional, practical, and tailored for advocate chambers in
             }
         }
 
-        const analysisText = result.text; // Text extraction is cleaner in the new SDK
-
         await db.query(
             'INSERT INTO ai_usage_logs (user_id, charged_amount) VALUES ($1::uuid, $2)',
             [userId, chargedAmount]
@@ -147,7 +149,7 @@ Keep the language professional, practical, and tailored for advocate chambers in
 
         res.json({
             success: true,
-            analysis: analysisText,
+            analysis: result.text,
             charged: chargedAmount > 0
         });
     } catch (err) {
@@ -164,28 +166,43 @@ Keep the language professional, practical, and tailored for advocate chambers in
 router.post('/chat', authenticateToken, async (req, res) => {
     const { images, language, previousAnalysis, chatMessages, newMessage, newAudio } = req.body;
 
-    if (!images || images.length === 0 || (!newMessage && !newAudio)) {
+    // ALLOW chat even if there are no images, as long as there is text/audio
+    if ((!images || images.length === 0) && !newMessage && !newAudio) {
         return res.status(400).json({ success: false, message: 'Invalid request data. Please provide text or audio.' });
     }
 
     try {
         const promptLang = language === 'en' ? 'English' : 'Bengali (বাংলা)';
         const legalPrompt = `
-You are a senior legal research assistant in Bangladesh analyzing legal documents.
-Review the provided document image(s) thoroughly and formulate your response strictly in ${promptLang}.
+You are a senior legal research assistant in Bangladesh.
+Formulate your response strictly in ${promptLang}.
+
+CRITICAL FORMATTING RULES:
+1. Deliver your response PARAGRAPH BY PARAGRAPH with double line breaks between them.
+2. Use clear, UPPERCASE HEADINGS if sections are needed.
+3. DO NOT use markdown asterisks (**) or hashes (#). Keep the text clean, lucrative, and easy to read on a mobile screen.
 `;
 
-        const imageParts = images.map(img => ({
-            inlineData: {
-                data: img.base64.replace(/^data:image\/[a-z]+;base64,/, ''),
-                mimeType: img.mimeType || 'image/jpeg'
-            }
-        }));
+        const contents = [];
+        const initialParts = [{ text: legalPrompt }];
 
-        const contents = [
-            { role: 'user', parts: [{ text: legalPrompt }, ...imageParts] },
-            { role: 'model', parts: [{ text: previousAnalysis }] }
-        ];
+        // Only attach images if they exist
+        if (images && images.length > 0) {
+            const imageParts = images.map(img => ({
+                inlineData: {
+                    data: img.base64.replace(/^data:image\/[a-z]+;base64,/, ''),
+                    mimeType: img.mimeType || 'image/jpeg'
+                }
+            }));
+            initialParts.push(...imageParts);
+        }
+
+        contents.push({ role: 'user', parts: initialParts });
+
+        // Push previous analysis only if it's a real document analysis
+        if (previousAnalysis && !previousAnalysis.includes("GENERAL CASE DISCUSSION")) {
+            contents.push({ role: 'model', parts: [{ text: previousAnalysis }] });
+        }
 
         if (chatMessages && Array.isArray(chatMessages)) {
             for (const msg of chatMessages) {
@@ -216,7 +233,7 @@ Review the provided document image(s) thoroughly and formulate your response str
                 });
 
                 if (!newMessage) {
-                    newParts.push({ text: `Please listen to this voice message from the lawyer and provide legal advice in ${promptLang} based on the document context.` });
+                    newParts.push({ text: `Please listen to this voice message from the lawyer and provide legal advice in ${promptLang} based on the context.` });
                 }
             }
         }
@@ -227,7 +244,6 @@ Review the provided document image(s) thoroughly and formulate your response str
         let maxRetries = 2;
         for (let attempt = 0; attempt <= maxRetries; attempt++) {
             try {
-                // 3. NEW SDK SYNTAX FOR CHAT (generateContent takes the array directly)
                 result = await ai.models.generateContent({
                     model: 'gemini-3.8-flash',
                     contents: contents
@@ -244,14 +260,14 @@ Review the provided document image(s) thoroughly and formulate your response str
             }
         }
 
-        res.json({ success: true, reply: result.text }); // Updated text extractor
+        res.json({ success: true, reply: result.text });
 
     } catch (err) {
         console.error('[AI CHAT ERROR]', err);
         if (err.status === 503) {
             res.status(503).json({ success: false, message: 'Google AI servers are currently overloaded. Please try again in a few minutes.' });
         } else {
-            res.status(500).json({ success: false, message: 'Chat failed.' });
+            res.status(500).json({ success: false, message: 'Chat failed. Check backend logs.' });
         }
     }
 });
