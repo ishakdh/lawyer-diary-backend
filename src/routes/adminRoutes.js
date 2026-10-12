@@ -25,7 +25,7 @@ router.get('/data', async (req, res) => {
                 COUNT(*)::int AS total_users,
                 COUNT(CASE WHEN trial_ends_at > CURRENT_TIMESTAMP AND is_active = TRUE THEN 1 END)::int AS active_users,
                 COUNT(CASE WHEN trial_ends_at <= CURRENT_TIMESTAMP OR is_active = FALSE THEN 1 END)::int AS inactive_users,
-                COALESCE((SELECT SUM(balance) FROM users), 0)::numeric AS platform_wallet_volume
+                COALESCE((SELECT SUM(wallet_balance) FROM users), 0)::numeric AS platform_wallet_volume
             FROM users;
         `);
 
