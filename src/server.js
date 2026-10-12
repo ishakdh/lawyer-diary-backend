@@ -37,6 +37,10 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/payment', paymentRoutes);
 app.use('/api/case-study', caseStudyRoutes);
 
+app.get('/', (req, res) => {
+    res.status(200).send('Backend is running perfectly!');
+});
+
 // Health Check Endpoint
 app.get('/api/health', (req, res) => {
     res.status(200).json({ status: 'OK', message: 'Lawyer Diary API is running smoothly' });
