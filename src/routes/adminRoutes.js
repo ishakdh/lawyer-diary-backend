@@ -73,16 +73,27 @@ router.put('/users/:id/fees', async (req, res) => {
 });
 
 
-// Example of what should be inside your backend adminRoutes.js
-router.put('/settings', authenticateToken, async (req, res) => {
+// Update System Settings (Subscription Tiers, Gateways, Referral Rules)
+router.put('/settings', async (req, res) => {
     try {
-        const { subscription_tiers, payment_gateways, default_free_trial_months, referral_reward_referrer_months, referral_reward_referee_months } = req.body;
+        const settingsToUpdate = req.body;
 
-        // Save logic to database...
+        for (const [key, value] of Object.entries(settingsToUpdate)) {
+            if (value !== undefined) {
+                // Upsert into system_settings table
+                await db.query(`
+                    INSERT INTO system_settings (setting_key, setting_value)
+                    VALUES ($1, $2)
+                    ON CONFLICT (setting_key) 
+                    DO UPDATE SET setting_value = EXCLUDED.setting_value;
+                `, [key, typeof value === 'object' ? JSON.stringify(value) : value]);
+            }
+        }
 
-        res.json({ success: true, message: 'Settings updated successfully' });
+        res.json({ success: true, message: 'Settings updated successfully!' });
     } catch (err) {
-        res.status(500).json({ success: false, message: 'Server error updating settings' });
+        console.error('[SETTINGS UPDATE ERROR]', err);
+        res.status(500).json({ success: false, message: 'Server error updating settings.' });
     }
 });
 
