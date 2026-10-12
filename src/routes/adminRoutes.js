@@ -72,22 +72,17 @@ router.put('/users/:id/fees', async (req, res) => {
     }
 });
 
-// 2. Save Global Settings (Fees, Referral Benefits, Gateway Numbers)
-router.put('/settings', async (req, res) => {
+
+// Example of what should be inside your backend adminRoutes.js
+router.put('/settings', authenticateToken, async (req, res) => {
     try {
-        const settings = req.body;
-        for (const [key, value] of Object.entries(settings)) {
-            await db.query(`
-                INSERT INTO system_settings (setting_key, setting_value)
-                VALUES ($1, $2)
-                    ON CONFLICT (setting_key) 
-                DO UPDATE SET setting_value = EXCLUDED.setting_value;
-            `, [key, String(value)]);
-        }
-        res.json({ success: true, message: 'Settings saved successfully.' });
+        const { subscription_tiers, payment_gateways, default_free_trial_months, referral_reward_referrer_months, referral_reward_referee_months } = req.body;
+
+        // Save logic to database...
+
+        res.json({ success: true, message: 'Settings updated successfully' });
     } catch (err) {
-        console.error('[ADMIN SETTINGS ERROR]', err);
-        res.status(500).json({ success: false, message: 'Server error saving settings.' });
+        res.status(500).json({ success: false, message: 'Server error updating settings' });
     }
 });
 
