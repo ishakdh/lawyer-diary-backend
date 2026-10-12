@@ -348,4 +348,41 @@ router.delete('/promos/:id', async (req, res) => {
     } catch (err) { res.status(500).json({ success: false }); }
 });
 
+// --- MANUAL RECHARGE BY ADMIN ---
+router.post('/manual-recharge', async (req, res) => {
+    try {
+        const { target_user_id, amount } = req.body;
+        const adminId = req.user.id;
+
+        if (!target_user_id || !amount || isNaN(amount) || amount <= 0) {
+            return res.status(400).json({ success: false, message: 'Invalid user or amount.' });
+        }
+
+        // 1. Update the Lawyer's Wallet Balance
+        await db.query(`
+            UPDATE users
+            SET wallet_balance = COALESCE(wallet_balance, 0) + $1
+            WHERE id = $2
+        `, [amount, target_user_id]);
+
+        // 2. Record the transaction for the Financial Ledger
+        const txnId = 'MANUAL-' + Math.random().toString(36).substr(2, 9).toUpperCase();
+        await db.query(`
+            INSERT INTO subscription_payments (user_id, amount, gateway_used, transaction_id)
+            VALUES ($1, $2, 'Manual Admin Recharge', $3)
+        `, [target_user_id, amount, txnId]);
+
+        // 3. Log the Admin action
+        await db.query(`
+            INSERT INTO activity_logs (user_id, action_type, description)
+            VALUES ($1, 'MANUAL_RECHARGE', $2)
+        `, [adminId, `Manually recharged ৳${amount} to user ID: ${target_user_id}`]);
+
+        res.json({ success: true, message: `Successfully recharged ৳${amount}!` });
+    } catch (err) {
+        console.error('[MANUAL RECHARGE ERROR]', err);
+        res.status(500).json({ success: false, message: 'Server error processing manual recharge.' });
+    }
+});
+
 module.exports = router;
