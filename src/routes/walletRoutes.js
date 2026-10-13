@@ -8,19 +8,19 @@ const ensureTablesExist = async () => {
     try {
         await db.query(`
             CREATE TABLE IF NOT EXISTS wallet_transactions (
-                id SERIAL PRIMARY KEY,
-                user_id VARCHAR(255),
+                                                               id SERIAL PRIMARY KEY,
+                                                               user_id VARCHAR(255),
                 amount NUMERIC(10,2),
                 transaction_type VARCHAR(50),
                 description TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
+                );
         `);
         await db.query(`
             CREATE TABLE IF NOT EXISTS system_settings (
-                setting_key VARCHAR(255) PRIMARY KEY,
+                                                           setting_key VARCHAR(255) PRIMARY KEY,
                 setting_value TEXT
-            );
+                );
         `);
     } catch (e) {
         console.warn('Table creation check failed (non-fatal):', e.message);
@@ -136,12 +136,12 @@ router.post('/topup', authenticateToken, async (req, res) => {
         let updateResult;
         try {
             const updateQuery = `
-                UPDATE users 
+                UPDATE users
                 SET wallet_balance = COALESCE(wallet_balance, 0) + $1,
-                    trial_ends_at = CASE 
-                        WHEN trial_ends_at < NOW() THEN NOW() + INTERVAL '30 days'
-                        ELSE trial_ends_at + INTERVAL '30 days'
-                    END
+                    trial_ends_at = CASE
+                                        WHEN trial_ends_at < NOW() THEN NOW() + INTERVAL '30 days'
+                    ELSE trial_ends_at + INTERVAL '30 days'
+                END
                 WHERE id = $2
                 RETURNING wallet_balance, trial_ends_at;
             `;
@@ -149,10 +149,10 @@ router.post('/topup', authenticateToken, async (req, res) => {
         } catch (updateErr) {
             // Fallback if trial_ends_at column is completely missing
             const fallbackQuery = `
-                UPDATE users 
+                UPDATE users
                 SET wallet_balance = COALESCE(wallet_balance, 0) + $1
                 WHERE id = $2
-                RETURNING wallet_balance;
+                    RETURNING wallet_balance;
             `;
             updateResult = await db.query(fallbackQuery, [amount, userId]);
         }
