@@ -4,19 +4,19 @@ const db = require('../config/db');
 const authenticateToken = require('../middleware/authenticateToken');
 const { GoogleGenAI } = require('@google/genai');
 
-// 1. COLLECT ACTIVE KEYS FROM THE 10-KEY POOL
+// 1. COLLECT ACTIVE KEYS FROM THE 30-KEY POOL
 const GEMINI_KEYS = [
-    process.env.GEMINI_KEY_1,
-    process.env.GEMINI_KEY_2,
-    process.env.GEMINI_KEY_3,
-    process.env.GEMINI_KEY_4,
-    process.env.GEMINI_KEY_5,
-    process.env.GEMINI_KEY_6,
-    process.env.GEMINI_KEY_7,
-    process.env.GEMINI_KEY_8,
-    process.env.GEMINI_KEY_9,
-    process.env.GEMINI_KEY_10
-].filter(Boolean);
+    process.env.GEMINI_KEY_1, process.env.GEMINI_KEY_2, process.env.GEMINI_KEY_3,
+    process.env.GEMINI_KEY_4, process.env.GEMINI_KEY_5, process.env.GEMINI_KEY_6,
+    process.env.GEMINI_KEY_7, process.env.GEMINI_KEY_8, process.env.GEMINI_KEY_9,
+    process.env.GEMINI_KEY_10, process.env.GEMINI_KEY_11, process.env.GEMINI_KEY_12,
+    process.env.GEMINI_KEY_13, process.env.GEMINI_KEY_14, process.env.GEMINI_KEY_15,
+    process.env.GEMINI_KEY_16, process.env.GEMINI_KEY_17, process.env.GEMINI_KEY_18,
+    process.env.GEMINI_KEY_19, process.env.GEMINI_KEY_20, process.env.GEMINI_KEY_21,
+    process.env.GEMINI_KEY_22, process.env.GEMINI_KEY_23, process.env.GEMINI_KEY_24,
+    process.env.GEMINI_KEY_25, process.env.GEMINI_KEY_26, process.env.GEMINI_KEY_27,
+    process.env.GEMINI_KEY_28, process.env.GEMINI_KEY_29, process.env.GEMINI_KEY_30
+].filter(Boolean); // .filter(Boolean) prevents crashes if you only add 15 or 20 keys for now.
 
 let currentKeyIndex = 0;
 
@@ -34,7 +34,6 @@ async function generateWithFailover(contents, model = 'gemini-3.8-flash') {
     const totalKeys = GEMINI_KEYS.length;
     let lastError = null;
 
-    // Loop through the key pool if a key hits rate limits or server overload
     for (let attempt = 0; attempt < totalKeys; attempt++) {
         const apiKey = getNextApiKey();
         const ai = new GoogleGenAI({ apiKey });
@@ -47,18 +46,13 @@ async function generateWithFailover(contents, model = 'gemini-3.8-flash') {
             return result;
         } catch (error) {
             lastError = error;
-
-            // Auto-switch to next key on quota depletion or server overload
             if (error.status === 429 || error.status === 503) {
                 console.warn(`[AI ROTATOR] Key slot hit HTTP ${error.status}. Automatically failing over to next key...`);
                 continue;
             }
-
-            // Stop loop on unrecoverable client errors
             throw error;
         }
     }
-
     throw lastError;
 }
 
@@ -73,7 +67,6 @@ async function generateWithFailover(contents, model = 'gemini-3.8-flash') {
                 charged_amount NUMERIC(10,2) DEFAULT 0.00
                 );
         `);
-        // Automatically fix the table if it was previously created with the wrong UUID type
         await db.query(`ALTER TABLE ai_usage_logs ALTER COLUMN user_id TYPE VARCHAR(255);`);
     } catch (e) {
         console.warn('AI usage table check:', e.message);
@@ -195,12 +188,11 @@ Keep the language professional, practical, and tailored for advocate chambers in
 
     } catch (err) {
         console.error('[AI CASE STUDY ERROR]', err);
-        if (err.status === 429) {
-            res.status(429).json({ success: false, message: 'All free API quota slots are currently exhausted. Please try again later.' });
-        } else if (err.status === 503) {
-            res.status(503).json({ success: false, message: 'Google servers are temporarily overloaded across all keys. Please try again in a few moments.' });
+        // NEW ERROR MESSAGE AS REQUESTED
+        if (err.status === 429 || err.status === 503) {
+            res.status(err.status).json({ success: false, message: 'The server is overloaded, Please try again after 1 minute' });
         } else {
-            res.status(500).json({ success: false, message: 'AI processing failed. Check image clarity and API keys.' });
+            res.status(500).json({ success: false, message: 'AI processing failed. Please check image clarity and try again.' });
         }
     }
 });
@@ -220,14 +212,14 @@ router.post('/chat', authenticateToken, async (req, res) => {
         const promptLang = language === 'en' ? 'English' : 'Bengali (বাংলা)';
         const contents = [];
 
-        // 1. Rehydrate context without heavy image payloads
+        // 1. Rehydrate context
         let contextText = `You are a senior legal assistant in Bangladesh. Respond strictly in ${promptLang}.\n`;
         if (previousAnalysis && !previousAnalysis.includes('GENERAL CASE DISCUSSION')) {
             contextText += `\nHere is the document summary generated earlier:\n${previousAnalysis}`;
         }
         contents.push({ role: 'user', parts: [{ text: contextText }] });
 
-        // 2. Retain recent conversational context (last 2 turns)
+        // 2. Retain recent conversational context
         if (chatMessages && Array.isArray(chatMessages)) {
             const recentChats = chatMessages.slice(-2);
             for (const msg of recentChats) {
@@ -271,12 +263,11 @@ router.post('/chat', authenticateToken, async (req, res) => {
 
     } catch (err) {
         console.error('[AI CHAT ERROR]', err);
-        if (err.status === 429) {
-            res.status(429).json({ success: false, message: 'Chat quota exhausted across all available keys.' });
-        } else if (err.status === 503) {
-            res.status(503).json({ success: false, message: 'Audio processing servers are temporarily congested. Please send a text query.' });
+        // NEW ERROR MESSAGE AS REQUESTED
+        if (err.status === 429 || err.status === 503) {
+            res.status(err.status).json({ success: false, message: 'The server is overloaded, Please try again after 1 minute' });
         } else {
-            res.status(500).json({ success: false, message: 'Chat execution failed.' });
+            res.status(500).json({ success: false, message: 'Chat execution failed. Please try again.' });
         }
     }
 });
