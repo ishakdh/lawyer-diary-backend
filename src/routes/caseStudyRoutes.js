@@ -82,6 +82,13 @@ async function generateWithFailover(contents, model = 'gemini-3.8-flash') {
 router.get('/quota', authenticateToken, async (req, res) => {
     try {
         const userId = req.user.id;
+
+        // 1. Validate UUID to prevent PostgreSQL 'string_to_uuid' crash
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        if (!userId || !uuidRegex.test(userId)) {
+            return res.status(401).json({ success: false, message: 'Invalid or missing User ID token. Please log out and log back in.' });
+        }
+
         const countRes = await db.query(`
             SELECT COUNT(*)::int AS used_count
             FROM ai_usage_logs
@@ -90,7 +97,7 @@ router.get('/quota', authenticateToken, async (req, res) => {
         `, [userId]);
 
         const usedCount = countRes.rows[0].used_count || 0;
-        const freeRemaining = Math.max(0, 10 - usedCount);
+        const freeRemaining = Math.max(0, 10 - usedCount); // Fixed syntax
 
         const userRes = await db.query('SELECT wallet_balance FROM users WHERE id = $1::uuid', [userId]);
         const balance = userRes.rows[0]?.wallet_balance || 0;
@@ -103,13 +110,21 @@ router.get('/quota', authenticateToken, async (req, res) => {
             wallet_balance: balance
         });
     } catch (err) {
-        res.status(500).json({ success: false, message: err.message });
+        console.error("Quota Check DB Error:", err);
+        res.status(500).json({ success: false, message: 'Database error checking quota' });
     }
 });
 
 // POST: Analyze legal document photos
 router.post('/analyze', authenticateToken, async (req, res) => {
     const userId = req.user.id;
+
+    // 1. Validate UUID to prevent PostgreSQL 'string_to_uuid' crash
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!userId || !uuidRegex.test(userId)) {
+        return res.status(401).json({ success: false, message: 'Invalid User ID token. Please log out and log back in.' });
+    }
+
     const { images, language } = req.body;
 
     if (!images || images.length === 0) {
@@ -137,7 +152,7 @@ router.post('/analyze', authenticateToken, async (req, res) => {
                     message: 'Monthly 10 free AI analyses reached. Please top up your wallet (minimum ৳1 balance required).'
                 });
             }
-            await db.query('UPDATE users SET wallet_balance = wallet_balance - 1.00 WHERE id = $1::uuid', [userId]);
+            await db.query('UPDATE users SET wallet_balance = wallet_balance - 1.00 WHERE id = $1::uuid', [userId]); // Fixed syntax
             chargedAmount = 1.00;
         }
 
@@ -148,14 +163,19 @@ Review the provided document image(s) thoroughly and formulate your response str
 
 CRITICAL FORMATTING RULES:
 1. Deliver your response PARAGRAPH BY PARAGRAPH with double line breaks between them.
+
 2. Use clear, UPPERCASE HEADINGS for each section (e.g., DOCUMENT CLASSIFICATION, CORE SUMMARY).
 3. DO NOT use markdown asterisks (**) or hashes (#). Use clean, plain text formatting suitable for legal documentation.
 
 Format your analysis covering:
 - DOCUMENT CLASSIFICATION
+
 - CORE SUMMARY
+
 - STRONG POINTS
+
 - WEAK POINTS & VULNERABILITIES
+
 - MISSING OR REQUIRED NEXT DOCUMENTS
 
 Keep the language professional, practical, and tailored for advocate chambers in Bangladesh.
@@ -200,6 +220,13 @@ Keep the language professional, practical, and tailored for advocate chambers in
 
 // POST: Follow-up case chat & voice notes
 router.post('/chat', authenticateToken, async (req, res) => {
+    // Need to validate UUID here as well if you interact with DB
+    const userId = req.user.id;
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!userId || !uuidRegex.test(userId)) {
+        return res.status(401).json({ success: false, message: 'Invalid User ID token. Please log out and log back in.' });
+    }
+
     const { language, previousAnalysis, chatMessages, newMessage, newAudio } = req.body;
 
     if (!newMessage && (!newAudio || newAudio.length === 0)) {
