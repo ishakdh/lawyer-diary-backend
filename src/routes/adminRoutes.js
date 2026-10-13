@@ -223,7 +223,7 @@ router.get('/users/:id/details', async (req, res) => {
         const userRes = await db.query(`
             SELECT id, full_name, phone_number, is_admin, is_active, trial_ends_at, created_at, last_login_at
             FROM users
-            WHERE id = $1::uuid;
+            WHERE id = $1;
         `, [id]);
 
         if (userRes.rows.length === 0) {
@@ -240,7 +240,7 @@ router.get('/users/:id/details', async (req, res) => {
                 SELECT
                     COUNT(DISTINCT client_name)::int AS active
                 FROM cases
-                WHERE chamber_owner_id = $1::uuid;
+                WHERE chamber_owner_id = $1;
             `, [id]);
             if (clientCounts.rows.length > 0) {
                 activeClients = clientCounts.rows[0].active || 0;
@@ -255,7 +255,7 @@ router.get('/users/:id/details', async (req, res) => {
             const payRes = await db.query(`
                 SELECT id, amount, gateway_used, transaction_id, created_at, 'RECHARGE' as type
                 FROM subscription_payments
-                WHERE user_id = $1::uuid;
+                WHERE user_id = $1;
             `, [id]);
             payments = payRes.rows;
         } catch (e) {}
@@ -266,7 +266,7 @@ router.get('/users/:id/details', async (req, res) => {
             const logRes = await db.query(`
                 SELECT id, action_type, description, created_at, 'ACTIVITY' as type
                 FROM activity_logs
-                WHERE user_id = $1::uuid
+                WHERE user_id = $1
                 ORDER BY created_at DESC;
             `, [id]);
             logs = logRes.rows;
