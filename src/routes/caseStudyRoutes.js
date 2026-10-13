@@ -54,7 +54,7 @@ async function generateWithFailover(contents, model = 'gemini-3.8-flash') {
                 continue;
             }
 
-            // Stop loop on unrecoverable client errors (e.g., bad image encoding, invalid syntax)
+            // Stop loop on unrecoverable client errors
             throw error;
         }
     }
@@ -62,17 +62,19 @@ async function generateWithFailover(contents, model = 'gemini-3.8-flash') {
     throw lastError;
 }
 
-// 3. ENSURE USAGE TRACKING TABLE EXISTS
+// 3. ENSURE USAGE TRACKING TABLE SUPPORTS YOUR INTEGER IDs
 (async () => {
     try {
         await db.query(`
             CREATE TABLE IF NOT EXISTS ai_usage_logs (
                                                          id SERIAL PRIMARY KEY,
-                                                         user_id UUID,
-                                                         used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                                                         charged_amount NUMERIC(10,2) DEFAULT 0.00
+                                                         user_id VARCHAR(255),
+                used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                charged_amount NUMERIC(10,2) DEFAULT 0.00
                 );
         `);
+        // Automatically fix the table if it was previously created with the wrong UUID type
+        await db.query(`ALTER TABLE ai_usage_logs ALTER COLUMN user_id TYPE VARCHAR(255);`);
     } catch (e) {
         console.warn('AI usage table check:', e.message);
     }
@@ -82,24 +84,19 @@ async function generateWithFailover(contents, model = 'gemini-3.8-flash') {
 router.get('/quota', authenticateToken, async (req, res) => {
     try {
         const userId = req.user.id;
-
-        // 1. Validate UUID to prevent PostgreSQL 'string_to_uuid' crash
-        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-        if (!userId || !uuidRegex.test(userId)) {
-            return res.status(401).json({ success: false, message: 'Invalid or missing User ID token. Please log out and log back in.' });
-        }
+        if (!userId) return res.status(401).json({ success: false, message: 'Unauthorized session.' });
 
         const countRes = await db.query(`
             SELECT COUNT(*)::int AS used_count
             FROM ai_usage_logs
-            WHERE user_id = $1::uuid
+            WHERE user_id = $1
               AND date_trunc('month', used_at) = date_trunc('month', CURRENT_TIMESTAMP);
         `, [userId]);
 
         const usedCount = countRes.rows[0].used_count || 0;
-        const freeRemaining = Math.max(0, 10 - usedCount); // Fixed syntax
+        const freeRemaining = Math.max(0, 10 - usedCount);
 
-        const userRes = await db.query('SELECT wallet_balance FROM users WHERE id = $1::uuid', [userId]);
+        const userRes = await db.query('SELECT wallet_balance FROM users WHERE id = $1', [userId]);
         const balance = userRes.rows[0]?.wallet_balance || 0;
 
         res.json({
@@ -118,12 +115,7 @@ router.get('/quota', authenticateToken, async (req, res) => {
 // POST: Analyze legal document photos
 router.post('/analyze', authenticateToken, async (req, res) => {
     const userId = req.user.id;
-
-    // 1. Validate UUID to prevent PostgreSQL 'string_to_uuid' crash
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    if (!userId || !uuidRegex.test(userId)) {
-        return res.status(401).json({ success: false, message: 'Invalid User ID token. Please log out and log back in.' });
-    }
+    if (!userId) return res.status(401).json({ success: false, message: 'Unauthorized session.' });
 
     const { images, language } = req.body;
 
@@ -135,7 +127,7 @@ router.post('/analyze', authenticateToken, async (req, res) => {
         const countRes = await db.query(`
             SELECT COUNT(*)::int AS used_count
             FROM ai_usage_logs
-            WHERE user_id = $1::uuid
+            WHERE user_id = $1
               AND date_trunc('month', used_at) = date_trunc('month', CURRENT_TIMESTAMP);
         `, [userId]);
 
@@ -143,7 +135,7 @@ router.post('/analyze', authenticateToken, async (req, res) => {
         let chargedAmount = 0.00;
 
         if (usedCount >= 10) {
-            const balRes = await db.query('SELECT wallet_balance FROM users WHERE id = $1::uuid', [userId]);
+            const balRes = await db.query('SELECT wallet_balance FROM users WHERE id = $1', [userId]);
             const currentBal = Number(balRes.rows[0]?.wallet_balance || 0);
 
             if (currentBal < 1.00) {
@@ -152,7 +144,7 @@ router.post('/analyze', authenticateToken, async (req, res) => {
                     message: 'Monthly 10 free AI analyses reached. Please top up your wallet (minimum ৳1 balance required).'
                 });
             }
-            await db.query('UPDATE users SET wallet_balance = wallet_balance - 1.00 WHERE id = $1::uuid', [userId]); // Fixed syntax
+            await db.query('UPDATE users SET wallet_balance = wallet_balance - 1.00 WHERE id = $1', [userId]);
             chargedAmount = 1.00;
         }
 
@@ -163,19 +155,14 @@ Review the provided document image(s) thoroughly and formulate your response str
 
 CRITICAL FORMATTING RULES:
 1. Deliver your response PARAGRAPH BY PARAGRAPH with double line breaks between them.
-
 2. Use clear, UPPERCASE HEADINGS for each section (e.g., DOCUMENT CLASSIFICATION, CORE SUMMARY).
 3. DO NOT use markdown asterisks (**) or hashes (#). Use clean, plain text formatting suitable for legal documentation.
 
 Format your analysis covering:
 - DOCUMENT CLASSIFICATION
-
 - CORE SUMMARY
-
 - STRONG POINTS
-
 - WEAK POINTS & VULNERABILITIES
-
 - MISSING OR REQUIRED NEXT DOCUMENTS
 
 Keep the language professional, practical, and tailored for advocate chambers in Bangladesh.
@@ -196,7 +183,7 @@ Keep the language professional, practical, and tailored for advocate chambers in
         const result = await generateWithFailover(contents, 'gemini-3.8-flash');
 
         await db.query(
-            'INSERT INTO ai_usage_logs (user_id, charged_amount) VALUES ($1::uuid, $2)',
+            'INSERT INTO ai_usage_logs (user_id, charged_amount) VALUES ($1, $2)',
             [userId, chargedAmount]
         );
 
@@ -220,12 +207,8 @@ Keep the language professional, practical, and tailored for advocate chambers in
 
 // POST: Follow-up case chat & voice notes
 router.post('/chat', authenticateToken, async (req, res) => {
-    // Need to validate UUID here as well if you interact with DB
     const userId = req.user.id;
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    if (!userId || !uuidRegex.test(userId)) {
-        return res.status(401).json({ success: false, message: 'Invalid User ID token. Please log out and log back in.' });
-    }
+    if (!userId) return res.status(401).json({ success: false, message: 'Unauthorized session.' });
 
     const { language, previousAnalysis, chatMessages, newMessage, newAudio } = req.body;
 
