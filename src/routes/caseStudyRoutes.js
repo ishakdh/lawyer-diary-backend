@@ -2,16 +2,67 @@ const express = require('express');
 const router = express.Router();
 const db = require('../config/db');
 const authenticateToken = require('../middleware/authenticateToken');
-
-// 1. IMPORT THE NEW SDK
 const { GoogleGenAI } = require('@google/genai');
 
-// 2. INITIALIZE WITH YOUR API KEY (Let the SDK handle the API version)
-const ai = new GoogleGenAI({
-    apiKey: process.env.GEMINI_API_KEY
-});
+// 1. COLLECT ACTIVE KEYS FROM THE 10-KEY POOL
+const GEMINI_KEYS = [
+    process.env.GEMINI_KEY_1,
+    process.env.GEMINI_KEY_2,
+    process.env.GEMINI_KEY_3,
+    process.env.GEMINI_KEY_4,
+    process.env.GEMINI_KEY_5,
+    process.env.GEMINI_KEY_6,
+    process.env.GEMINI_KEY_7,
+    process.env.GEMINI_KEY_8,
+    process.env.GEMINI_KEY_9,
+    process.env.GEMINI_KEY_10
+].filter(Boolean);
 
-// Ensure usage tracking table exists
+let currentKeyIndex = 0;
+
+function getNextApiKey() {
+    if (GEMINI_KEYS.length === 0) {
+        throw new Error('No valid GEMINI_KEY entries found in environment variables.');
+    }
+    const key = GEMINI_KEYS[currentKeyIndex];
+    currentKeyIndex = (currentKeyIndex + 1) % GEMINI_KEYS.length;
+    return key;
+}
+
+// 2. RESILIENT GENERATION ENGINE WITH FAILOVER
+async function generateWithFailover(contents, model = 'gemini-3.8-flash') {
+    const totalKeys = GEMINI_KEYS.length;
+    let lastError = null;
+
+    // Loop through the key pool if a key hits rate limits or server overload
+    for (let attempt = 0; attempt < totalKeys; attempt++) {
+        const apiKey = getNextApiKey();
+        const ai = new GoogleGenAI({ apiKey });
+
+        try {
+            const result = await ai.models.generateContent({
+                model: model,
+                contents: contents
+            });
+            return result;
+        } catch (error) {
+            lastError = error;
+
+            // Auto-switch to next key on quota depletion or server overload
+            if (error.status === 429 || error.status === 503) {
+                console.warn(`[AI ROTATOR] Key slot hit HTTP ${error.status}. Automatically failing over to next key...`);
+                continue;
+            }
+
+            // Stop loop on unrecoverable client errors (e.g., bad image encoding, invalid syntax)
+            throw error;
+        }
+    }
+
+    throw lastError;
+}
+
+// 3. ENSURE USAGE TRACKING TABLE EXISTS
 (async () => {
     try {
         await db.query(`
@@ -27,7 +78,7 @@ const ai = new GoogleGenAI({
     }
 })();
 
-// GET usage quota status for the current month
+// GET: Usage quota status for the current month
 router.get('/quota', authenticateToken, async (req, res) => {
     try {
         const userId = req.user.id;
@@ -56,7 +107,7 @@ router.get('/quota', authenticateToken, async (req, res) => {
     }
 });
 
-// POST analyze document photos
+// POST: Analyze legal document photos
 router.post('/analyze', authenticateToken, async (req, res) => {
     const userId = req.user.id;
     const { images, language } = req.body;
@@ -98,7 +149,7 @@ Review the provided document image(s) thoroughly and formulate your response str
 CRITICAL FORMATTING RULES:
 1. Deliver your response PARAGRAPH BY PARAGRAPH with double line breaks between them.
 2. Use clear, UPPERCASE HEADINGS for each section (e.g., DOCUMENT CLASSIFICATION, CORE SUMMARY).
-3. DO NOT use markdown asterisks (**) or hashes (#). Use clean, plain text formatting that looks highly professional, lucrative, and easy to read on a mobile device.
+3. DO NOT use markdown asterisks (**) or hashes (#). Use clean, plain text formatting suitable for legal documentation.
 
 Format your analysis covering:
 - DOCUMENT CLASSIFICATION
@@ -121,26 +172,8 @@ Keep the language professional, practical, and tailored for advocate chambers in
             { role: 'user', parts: [{ text: legalPrompt }, ...imageParts] }
         ];
 
-        let result;
-        let maxRetries = 2;
-        for (let attempt = 0; attempt <= maxRetries; attempt++) {
-            try {
-                // CHANGED TO gemini-1.5-flash
-                result = await ai.models.generateContent({
-                    model: 'gemini-3.8-flash',
-                    contents: contents
-                });
-                break;
-            } catch (error) {
-                if (error.status === 503 && attempt < maxRetries) {
-                    const waitTime = (attempt + 1) * 2000;
-                    console.log(`[AI 503 OVERLOAD] Google server busy. Retrying in ${waitTime/1000}s...`);
-                    await new Promise(resolve => setTimeout(resolve, waitTime));
-                } else {
-                    throw error;
-                }
-            }
-        }
+        // Execute request through the failover engine
+        const result = await generateWithFailover(contents, 'gemini-3.8-flash');
 
         await db.query(
             'INSERT INTO ai_usage_logs (user_id, charged_amount) VALUES ($1::uuid, $2)',
@@ -152,68 +185,53 @@ Keep the language professional, practical, and tailored for advocate chambers in
             analysis: result.text,
             charged: chargedAmount > 0
         });
+
     } catch (err) {
         console.error('[AI CASE STUDY ERROR]', err);
-        if (err.status === 503) {
-            res.status(503).json({ success: false, message: 'Google AI servers are currently overloaded. Please try again in a few minutes.' });
+        if (err.status === 429) {
+            res.status(429).json({ success: false, message: 'All free API quota slots are currently exhausted. Please try again later.' });
+        } else if (err.status === 503) {
+            res.status(503).json({ success: false, message: 'Google servers are temporarily overloaded across all keys. Please try again in a few moments.' });
         } else {
-            res.status(500).json({ success: false, message: 'AI processing failed. Check API key and image clarity.' });
+            res.status(500).json({ success: false, message: 'AI processing failed. Check image clarity and API keys.' });
         }
     }
 });
 
-// POST follow-up chat
+// POST: Follow-up case chat & voice notes
 router.post('/chat', authenticateToken, async (req, res) => {
-    const { images, language, previousAnalysis, chatMessages, newMessage, newAudio } = req.body;
+    const { language, previousAnalysis, chatMessages, newMessage, newAudio } = req.body;
 
-    // ALLOW chat even if there are no images, as long as there is text/audio
-    if ((!images || images.length === 0) && !newMessage && !newAudio) {
-        return res.status(400).json({ success: false, message: 'Invalid request data. Please provide text or audio.' });
+    if (!newMessage && (!newAudio || newAudio.length === 0)) {
+        return res.status(400).json({ success: false, message: 'Please provide a message or voice recording.' });
     }
 
     try {
         const promptLang = language === 'en' ? 'English' : 'Bengali (বাংলা)';
-        const legalPrompt = `
-You are a senior legal research assistant in Bangladesh.
-Formulate your response strictly in ${promptLang}.
-
-CRITICAL FORMATTING RULES:
-1. Deliver your response PARAGRAPH BY PARAGRAPH with double line breaks between them.
-2. Use clear, UPPERCASE HEADINGS if sections are needed.
-3. DO NOT use markdown asterisks (**) or hashes (#). Keep the text clean, lucrative, and easy to read on a mobile screen.
-`;
-
         const contents = [];
-        const initialParts = [{ text: legalPrompt }];
 
-        // Only attach images if they exist
-        if (images && images.length > 0) {
-            const imageParts = images.map(img => ({
-                inlineData: {
-                    data: img.base64.replace(/^data:image\/[a-z]+;base64,/, ''),
-                    mimeType: img.mimeType || 'image/jpeg'
-                }
-            }));
-            initialParts.push(...imageParts);
+        // 1. Rehydrate context without heavy image payloads
+        let contextText = `You are a senior legal assistant in Bangladesh. Respond strictly in ${promptLang}.\n`;
+        if (previousAnalysis && !previousAnalysis.includes('GENERAL CASE DISCUSSION')) {
+            contextText += `\nHere is the document summary generated earlier:\n${previousAnalysis}`;
         }
+        contents.push({ role: 'user', parts: [{ text: contextText }] });
 
-        contents.push({ role: 'user', parts: initialParts });
-
-        // Push previous analysis only if it's a real document analysis
-        if (previousAnalysis && !previousAnalysis.includes("GENERAL CASE DISCUSSION")) {
-            contents.push({ role: 'model', parts: [{ text: previousAnalysis }] });
-        }
-
+        // 2. Retain recent conversational context (last 2 turns)
         if (chatMessages && Array.isArray(chatMessages)) {
-            for (const msg of chatMessages) {
-                if (msg.text !== '🎤 Voice Message sent') {
-                    contents.push({ role: msg.role === 'model' ? 'model' : 'user', parts: [{ text: msg.text }] });
+            const recentChats = chatMessages.slice(-2);
+            for (const msg of recentChats) {
+                if (msg.text && !msg.text.includes('🎤')) {
+                    contents.push({
+                        role: msg.role === 'model' ? 'model' : 'user',
+                        parts: [{ text: msg.text }]
+                    });
                 }
             }
         }
 
+        // 3. Attach new text or voice data
         const newParts = [];
-
         if (newMessage) {
             newParts.push({ text: newMessage });
         }
@@ -221,53 +239,34 @@ CRITICAL FORMATTING RULES:
         if (newAudio && newAudio.length > 0) {
             const parts = newAudio.split(';base64,');
             if (parts.length === 2) {
-                const rawMimeType = parts[0].replace('data:', '');
-                const cleanMimeType = rawMimeType.split(';')[0];
-                const base64Data = parts[1];
-
+                const cleanMimeType = parts[0].replace('data:', '').split(';')[0];
                 newParts.push({
                     inlineData: {
                         mimeType: cleanMimeType,
-                        data: base64Data
+                        data: parts[1]
                     }
                 });
-
                 if (!newMessage) {
-                    newParts.push({ text: `Please listen to this voice message from the lawyer and provide legal advice in ${promptLang} based on the context.` });
+                    newParts.push({ text: 'Please analyze this voice inquiry from the advocate and advise accordingly.' });
                 }
             }
         }
 
         contents.push({ role: 'user', parts: newParts });
 
-        let result;
-        let maxRetries = 2;
-        for (let attempt = 0; attempt <= maxRetries; attempt++) {
-            try {
-                result = await ai.models.generateContent({
-                    model: 'gemini-3.8-flash',
-                    contents: contents
-                });
-                break;
-            } catch (error) {
-                if (error.status === 503 && attempt < maxRetries) {
-                    const waitTime = (attempt + 1) * 2000;
-                    console.log(`[AI CHAT 503 OVERLOAD] Google server busy. Retrying in ${waitTime/1000}s...`);
-                    await new Promise(resolve => setTimeout(resolve, waitTime));
-                } else {
-                    throw error;
-                }
-            }
-        }
+        // 4. Execute chat request through key failover pool
+        const result = await generateWithFailover(contents, 'gemini-3.8-flash');
 
         res.json({ success: true, reply: result.text });
 
     } catch (err) {
         console.error('[AI CHAT ERROR]', err);
-        if (err.status === 503) {
-            res.status(503).json({ success: false, message: 'Google AI servers are currently overloaded. Please try again in a few minutes.' });
+        if (err.status === 429) {
+            res.status(429).json({ success: false, message: 'Chat quota exhausted across all available keys.' });
+        } else if (err.status === 503) {
+            res.status(503).json({ success: false, message: 'Audio processing servers are temporarily congested. Please send a text query.' });
         } else {
-            res.status(500).json({ success: false, message: 'Chat failed. Check backend logs.' });
+            res.status(500).json({ success: false, message: 'Chat execution failed.' });
         }
     }
 });
