@@ -132,7 +132,7 @@ router.get('/referral-stats', authenticateToken, async (req, res) => {
             success: true,
             referral_code: referralCode,
             total_referred: totalReferred,
-            shareable_link: `https://yourlawyerdiary.com/register?ref=${referralCode}`
+            shareable_link: `https://app.lawyer.trvnx.com/register?ref=${referralCode}`
         });
 
     } catch (error) {
