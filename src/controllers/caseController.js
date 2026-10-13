@@ -70,12 +70,15 @@ exports.createCase = async (req, res) => {
 // 2. Get all cases
 exports.getCases = async (req, res) => {
     try {
+        // FIX: Ensure lawyerId is properly handled whether it comes in as string or number from the token
         const lawyerId = req.user.id;
-        const lawyerRes = await db.query('SELECT full_name FROM users WHERE id = $1', [lawyerId]);
-        const lawyerName = lawyerRes.rows.length > 0 ? lawyerRes.rows[0].full_name : 'Lawyer';
 
+        const lawyerRes = await db.query('SELECT full_name FROM users WHERE id = $1', [lawyerId]);
+        const lawyerName = lawyerRes.rows.length > 0 ? lawyerRes.rows.length > 0 ? lawyerRes.rows[0].full_name : 'Lawyer' : 'Lawyer';
+
+        // Using coercion/casting in SQL or passing lawyerId safely
         const casesResult = await db.query(
-            `SELECT * FROM cases WHERE chamber_owner_id = $1 ORDER BY is_closed ASC, next_hearing_date ASC NULLS LAST`,
+            `SELECT * FROM cases WHERE chamber_owner_id::text = $1::text ORDER BY is_closed ASC, next_hearing_date ASC NULLS LAST`,
             [lawyerId]
         );
 
