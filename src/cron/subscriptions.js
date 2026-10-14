@@ -1,79 +1,98 @@
 const cron = require('node-cron');
 const db = require('../config/db');
 
-// Runs every night at exactly midnight (00:00)
-cron.schedule('0 0 * * *', async () => {
+// Runs every night at exactly 00:01
+cron.schedule('1 0 * * *', async () => {
     console.log('[BILLING ENGINE] Starting midnight subscription processing...');
 
     try {
-        // 1. Find all users whose trial or current billing month has ended
+        // ==========================================
+        // TASK 1: Send 2-Day Warning Notifications
+        // ==========================================
+        const warningRes = await db.query(`
+            SELECT id, full_name 
+            FROM users 
+            WHERE DATE(trial_ends_at) = CURRENT_DATE + INTERVAL '2 days'
+        `);
+
+        for (const user of warningRes.rows) {
+            // Insert notification (Ensure your notifications table matches this structure)
+            try {
+                await db.query(`
+                    INSERT INTO notifications (user_id, title, message, type)
+                    VALUES ($1, $2, $3, 'WARNING')
+                `, [
+                    user.id,
+                    'Subscription Expiring Soon',
+                    `Your subscription plan will expire in 2 days. Please ensure you have at least ৳30 in your available balance to continue services seamlessly.`
+                ]);
+                console.log(`[BILLING] Sent 2-day warning to ${user.full_name}`);
+            } catch (err) {
+                console.warn(`[BILLING] Could not send notification to ${user.full_name}. Ensure notifications table exists.`);
+            }
+        }
+
+        // ==========================================
+        // TASK 2: Process Expired Subscriptions
+        // ==========================================
         const expiredUsersRes = await db.query(`
             SELECT id, full_name, wallet_balance, trial_ends_at 
             FROM users 
             WHERE trial_ends_at <= CURRENT_TIMESTAMP
         `);
 
-        const usersToBill = expiredUsersRes.rows;
-
-        if (usersToBill.length === 0) {
-            console.log('[BILLING ENGINE] No subscriptions due today.');
-            return;
-        }
-
-        // 2. Fetch the latest pricing tiers set by the Master Admin
-        const tiersRes = await db.query('SELECT * FROM subscription_tiers ORDER BY min_clients ASC');
-        const tiers = tiersRes.rows;
-
-        for (const user of usersToBill) {
-            // 3. Count how many unique clients this lawyer has active right now
+        for (const user of expiredUsersRes.rows) {
+            // Count UNIQUE clients where the case is NOT closed
+            // Note: If your cases table uses 'chamber_owner_id' instead of 'user_id', change it below.
             const clientCountRes = await db.query(`
-                SELECT COUNT(DISTINCT client_phone) as total_clients 
-                FROM cases 
-                WHERE chamber_owner_id = $1
+                SELECT COUNT(DISTINCT client_phone) as total_clients
+                FROM cases
+                WHERE user_id = $1 AND is_closed = false
             `, [user.id]);
 
             const clientCount = parseInt(clientCountRes.rows[0].total_clients);
 
-            // 4. Determine their correct pricing tier based on client count
-            let matchedTier = tiers[tiers.length - 1]; // Default to highest tier just in case
-            for (const tier of tiers) {
-                if (clientCount >= tier.min_clients && (tier.max_clients === null || clientCount <= tier.max_clients)) {
-                    matchedTier = tier;
-                    break;
-                }
+            // Tier Pricing Logic
+            let amountDue = 0;
+            let tierName = "Free Tier (0-5 Clients)";
+
+            if (clientCount >= 6 && clientCount <= 50) {
+                amountDue = 30.00;
+                tierName = "Standard Tier (6-50 Clients)";
+            } else if (clientCount > 50) {
+                amountDue = 60.00; // Example for 51+ clients, adjust as needed
+                tierName = "Pro Tier (51+ Clients)";
             }
 
-            // 5. Process the Payment
-            const amountDue = parseFloat(matchedTier.monthly_price);
+            if (amountDue === 0) {
+                // FREE TIER: Auto-extend for 1 month at no cost
+                await db.query(`UPDATE users SET trial_ends_at = trial_ends_at + INTERVAL '1 month' WHERE id = $1`, [user.id]);
+                console.log(`[BILLING] ${user.full_name} has ${clientCount} clients (Free Tier). Auto-extended 1 month.`);
+            } else {
+                // PAID TIER: Check wallet balance
+                if (user.wallet_balance >= amountDue) {
+                    // Deduct money and extend validity
+                    await db.query(`
+                        UPDATE users 
+                        SET wallet_balance = wallet_balance - $1, 
+                            trial_ends_at = trial_ends_at + INTERVAL '1 month' 
+                        WHERE id = $2
+                    `, [amountDue, user.id]);
 
-            console.log(`[BILLING] Lawyer ${user.full_name} has ${clientCount} clients. Tier: ${matchedTier.tier_name} (৳${amountDue})`);
-
-            if (user.wallet_balance >= amountDue) {
-                // Deduct money and extend their access by exactly 1 month
-                await db.query(`
-                    UPDATE users 
-                    SET wallet_balance = wallet_balance - $1, 
-                        trial_ends_at = trial_ends_at + INTERVAL '1 month' 
-                    WHERE id = $2
-                `, [amountDue, user.id]);
-
-                // Log the payment in the wallet ledger
-                if (amountDue > 0) {
+                    // Log the deduction as an expense in the ledger
                     await db.query(`
                         INSERT INTO wallet_transactions (user_id, amount, transaction_type, description) 
-                        VALUES ($1, $2, 'USAGE_DEDUCTION', $3)
-                    `, [user.id, amountDue, `Monthly Subscription: ${matchedTier.tier_name} Tier`]);
-                }
+                        VALUES ($1, $2, 'SUBSCRIPTION_FEE', $3)
+                    `, [String(user.id), -amountDue, `Monthly Subscription Auto-Renewal: ${tierName}`]);
 
-                console.log(`[BILLING] SUCCESS: Deducted ৳${amountDue} from ${user.full_name}. Access extended for 1 month.`);
-            } else {
-                // Insufficient funds - they stay expired.
-                console.log(`[BILLING] FAILED: ${user.full_name} has insufficient funds (Balance: ৳${user.wallet_balance}, Needed: ৳${amountDue}).`);
+                    console.log(`[BILLING] SUCCESS: Deducted ৳${amountDue} from ${user.full_name}. Extended 1 month.`);
+                } else {
+                    // Insufficient funds: Leave them expired (Frontend will lock them out automatically)
+                    console.log(`[BILLING] FAILED: ${user.full_name} has insufficient funds (Balance: ৳${user.wallet_balance}, Needed: ৳${amountDue}). Account Locked.`);
+                }
             }
         }
-
         console.log('[BILLING ENGINE] Midnight processing complete.');
-
     } catch (error) {
         console.error('[BILLING ENGINE] Error processing subscriptions:', error);
     }

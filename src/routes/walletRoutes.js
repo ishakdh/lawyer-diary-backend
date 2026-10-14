@@ -250,32 +250,62 @@ router.post('/verify-manual', authenticateToken, async (req, res) => {
             [userId, webhookRow.id]
         );
 
-        // 2. Credit the lawyer's wallet balance
+        // 2. Credit the lawyer's wallet balance initially
+        await db.query(`UPDATE users SET wallet_balance = COALESCE(wallet_balance, 0) + $1 WHERE id = $2`, [lawyerAmount, userId]);
+
+        // 3. Insert top-up transaction ledger record
         await db.query(
-            `UPDATE users
-             SET wallet_balance = COALESCE(wallet_balance, 0) + $1
-             WHERE id = $2`,
-            [lawyerAmount, userId]
+            `INSERT INTO wallet_transactions (user_id, amount, transaction_type, description) VALUES ($1, $2, 'TOP_UP', $3)`,
+            [String(userId), lawyerAmount, `${gateway || 'bKash'} Top-Up (TrxID: ${lawyerTrx})`]
         );
 
-        // 3. Insert transaction ledger record
-        await db.query(
-            `INSERT INTO wallet_transactions (user_id, amount, transaction_type, description)
-             VALUES ($1, $2, 'TOP_UP', $3)`,
-            [userId, lawyerAmount, `${gateway || 'bKash'} Top-Up (TrxID: ${lawyerTrx})`]
-        );
+        // ==========================================
+        // 4. AUTO-RECOVERY ENGINE
+        // ==========================================
+        const userCheck = await db.query(`SELECT wallet_balance, trial_ends_at FROM users WHERE id = $1`, [userId]);
+        const user = userCheck.rows[0];
+
+        // If their account was expired, check if they now have enough to pay their pending subscription
+        if (new Date(user.trial_ends_at) <= new Date()) {
+            const clientCountRes = await db.query(`SELECT COUNT(DISTINCT client_phone) as total_clients FROM cases WHERE user_id = $1 AND is_closed = false`, [userId]);
+            const clientCount = parseInt(clientCountRes.rows[0].total_clients);
+
+            let amountDue = 0;
+            let tierName = "Free Tier";
+            if (clientCount >= 6 && clientCount <= 50) { amountDue = 30.00; tierName = "Standard Tier (6-50 Clients)"; }
+            else if (clientCount > 50) { amountDue = 60.00; tierName = "Pro Tier (51+ Clients)"; }
+
+            // If they owe money and their new balance covers it, deduct it instantly and unlock the account!
+            if (amountDue > 0 && user.wallet_balance >= amountDue) {
+                await db.query(`
+                    UPDATE users
+                    SET wallet_balance = wallet_balance - $1,
+                        trial_ends_at = NOW() + INTERVAL '1 month'
+                    WHERE id = $2
+                `, [amountDue, userId]);
+
+                await db.query(`
+                    INSERT INTO wallet_transactions (user_id, amount, transaction_type, description)
+                    VALUES ($1, $2, 'SUBSCRIPTION_FEE', $3)
+                `, [String(userId), -amountDue, `Account Auto-Recovery: ${tierName}`]);
+            } else if (amountDue === 0) {
+                // If they are free tier but somehow expired, unlock them for free
+                await db.query(`UPDATE users SET trial_ends_at = NOW() + INTERVAL '1 month' WHERE id = $1`, [userId]);
+            }
+        }
 
         return res.json({
             success: true,
             message: `৳${lawyerAmount} credited successfully to your wallet balance.`
         });
+
     } catch (err) {
         console.error('verify-manual error:', err);
         return res.status(500).json({ success: false, message: 'Transaction failed: ' + err.message });
     }
 });
 
-// Add this temporarily at the bottom of walletRoutes.js
+// Add this temporarily at the bottom of walletRoutes.js to fix old records
 router.get('/fix-ledger', async (req, res) => {
     try {
         await db.query(`UPDATE wallet_transactions SET transaction_type = 'TOP_UP' WHERE transaction_type = 'TOPUP'`);
