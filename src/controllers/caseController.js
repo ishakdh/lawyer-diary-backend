@@ -309,6 +309,7 @@ exports.deleteCase = async (req, res) => {
 
 // 9. Update case notes (FIXED: Properly exported and querying chamber_owner_id)
 exports.updateCaseNotes = async (req, res) => {
+    console.log("=== HIT UPDATE CASE NOTES ROUTE ===", req.params, req.body);
     try {
         const { id } = req.params;
         const { notes } = req.body;
