@@ -275,4 +275,14 @@ router.post('/verify-manual', authenticateToken, async (req, res) => {
     }
 });
 
+// Add this temporarily at the bottom of walletRoutes.js
+router.get('/fix-ledger', async (req, res) => {
+    try {
+        await db.query(`UPDATE wallet_transactions SET transaction_type = 'TOP_UP' WHERE transaction_type = 'TOPUP'`);
+        res.json({ success: true, message: "Old records fixed! You can now refresh your Admin Dashboard." });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 module.exports = router;
