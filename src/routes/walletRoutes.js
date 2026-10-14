@@ -315,4 +315,14 @@ router.get('/fix-ledger', async (req, res) => {
     }
 });
 
+// Add this right BEFORE module.exports = router;
+router.get('/fix-all-trials', async (req, res) => {
+    try {
+        await db.query(`UPDATE users SET trial_ends_at = NOW() + INTERVAL '30 days' WHERE trial_ends_at <= NOW()`);
+        res.json({ success: true, message: "All locked accounts have been granted 30 days!" });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 module.exports = router;
