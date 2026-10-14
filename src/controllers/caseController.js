@@ -318,3 +318,26 @@ exports.deleteCase = async (req, res) => {
         res.status(500).json({ success: false, message: 'Server error while deleting case.' });
     }
 };
+
+exports.updateCaseNotes = async (req, res) => {
+    const { id } = req.params;
+    const { notes } = req.body;
+    const lawyerId = req.user.id;
+
+    try {
+        // FIX: Use chamber_owner_id instead of user_id to match your database schema
+        const result = await db.query(
+            'UPDATE cases SET notes = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND chamber_owner_id::text = $3::text RETURNING *',
+            [notes, id, lawyerId]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ success: false, message: 'Case not found or unauthorized.' });
+        }
+
+        res.json({ success: true, case: result.rows[0] });
+    } catch (err) {
+        console.error('Save Notes Error:', err);
+        res.status(500).json({ success: false, message: 'Server error while saving notes.' });
+    }
+};
