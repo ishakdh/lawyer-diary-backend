@@ -143,7 +143,11 @@ router.post('/register-verify', async (req, res) => {
 
         const insertQuery = `
             INSERT INTO users (full_name, email, password, phone_number, address, referral_code, referred_by, trial_ends_at, auto_sms_enabled, last_login_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP + INTERVAL '${totalTrialMonths} months', $8, CURRENT_TIMESTAMP)
+            VALUES (
+                       $1, $2, $3, $4, $5, $6, $7,
+                       CURRENT_TIMESTAMP + INTERVAL '30 days', -- Force 30 days strictly!
+                       $8, CURRENT_TIMESTAMP
+                   )
                 RETURNING id, full_name, phone_number, trial_ends_at;
         `;
 
