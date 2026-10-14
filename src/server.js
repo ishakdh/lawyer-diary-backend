@@ -1,6 +1,9 @@
 // src/server.js
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const jwt = require('jsonwebtoken');
 require('dotenv').config();
 
 // 1. Initialize background jobs
@@ -21,11 +24,75 @@ const caseStudyRoutes = require('./routes/caseStudyRoutes');
 
 const app = express();
 
-app.use(cors());
+// Trust Coolify reverse proxy so rate-limiting sees real user IPs
+app.set('trust proxy', 1);
 
-// IMPORTANT: Body size limits MUST be here, before the routes.
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
+// 2. Security Headers
+app.use(helmet());
+
+// 3. Strict CORS Configuration
+const allowedOrigins = [
+    'https://app.lawyer.trvnx.com',
+    'http://localhost:5173',
+    'http://localhost:3000'
+];
+
+app.use(cors({
+    origin: function (origin, callback) {
+        // Allow requests with no origin (like mobile apps, curl, or server-to-server healthchecks)
+        if (!origin || allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(new Error('Blocked by CORS policy'));
+        }
+    },
+    credentials: true
+}));
+
+// 4. Rate Limiters (Stop Brute-Force & DDoS)
+const globalLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 300, // Limit each IP to 300 requests per 15 mins
+    message: { success: false, message: 'Too many requests, please try again later.' }
+});
+app.use('/api', globalLimiter);
+
+const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 20, // Strict limit for login/signup attempts
+    message: { success: false, message: 'Too many login attempts, please wait 15 minutes.' }
+});
+app.use('/api/auth', authLimiter);
+
+// 5. Body size limits
+app.use(express.json({ limit: '15mb' }));
+app.use(express.urlencoded({ limit: '15mb', extended: true }));
+
+// 6. Admin Protection Middleware for Gateway Saving
+const verifyAdmin = async (req, res, next) => {
+    try {
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+            return res.status(401).json({ success: false, message: 'Unauthorized: No token provided' });
+        }
+
+        const token = authHeader.split(' ')[1];
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+        // Verify user is actually an admin in the database
+        const userCheck = await db.query('SELECT role, is_admin FROM users WHERE id = $1', [decoded.id]);
+        const user = userCheck.rows[0];
+
+        if (!user || (user.role !== 'admin' && user.role !== 'superadmin' && !user.is_admin)) {
+            return res.status(403).json({ success: false, message: 'Forbidden: Admin access required' });
+        }
+
+        req.user = decoded;
+        next();
+    } catch (err) {
+        return res.status(401).json({ success: false, message: 'Invalid or expired token' });
+    }
+};
 
 // Apply Routes
 app.use('/api/auth', authRoutes);
@@ -46,29 +113,10 @@ app.get('/api/health', (req, res) => {
     res.status(200).json({ status: 'OK', message: 'Lawyer Diary API is running smoothly' });
 });
 
-// Database Connection Test Endpoint
-app.get('/api/db-test', async (req, res) => {
-    try {
-        const result = await db.query('SELECT NOW()');
-        res.status(200).json({ success: true, message: 'Database connection successful!', time: result.rows[0].now });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
 // 1. GET ROUTE: Fetches gateways for BOTH Admin Panel and Top-Up Modal
 app.get('/api/gateways', async (req, res) => {
     try {
-        await db.query(`
-            CREATE TABLE IF NOT EXISTS payment_gateways (
-                id SERIAL PRIMARY KEY,
-                provider VARCHAR(50),
-                account_number VARCHAR(50),
-                account_type VARCHAR(50),
-                is_active BOOLEAN DEFAULT true
-            );
-        `);
-        const result = await db.query('SELECT * FROM payment_gateways ORDER BY id ASC');
+        const result = await db.query('SELECT id, provider, account_number, account_type, is_active FROM payment_gateways WHERE is_active = true ORDER BY id ASC');
         res.json({ success: true, gateways: result.rows });
     } catch (err) {
         console.error("GET Gateways Error:", err);
@@ -76,60 +124,28 @@ app.get('/api/gateways', async (req, res) => {
     }
 });
 
-// 2. POST ROUTE: Admin saves all gateways
-app.post('/api/gateways/save', async (req, res) => {
+// 2. POST ROUTE: Protected so ONLY Admin can save gateways
+app.post('/api/gateways/save', verifyAdmin, async (req, res) => {
     const { gateways } = req.body;
-    try {
-        await db.query(`
-            CREATE TABLE IF NOT EXISTS payment_gateways (
-                id SERIAL PRIMARY KEY,
-                provider VARCHAR(50),
-                account_number VARCHAR(50),
-                account_type VARCHAR(50),
-                is_active BOOLEAN DEFAULT true
-            );
-        `);
+    if (!Array.isArray(gateways)) {
+        return res.status(400).json({ success: false, message: 'Invalid gateway data' });
+    }
 
+    try {
         await db.query('DELETE FROM payment_gateways');
 
         for (const g of gateways) {
             if (g.account_number && g.account_number.trim() !== '') {
                 await db.query(
                     'INSERT INTO payment_gateways (provider, account_number, account_type, is_active) VALUES ($1, $2, $3, $4)',
-                    [g.provider, g.account_number, g.account_type, true]
+                    [g.provider, g.account_number.trim(), g.account_type, true]
                 );
             }
         }
-        res.json({ success: true, message: 'Gateways saved successfully' });
+        res.json({ success: true, message: 'Gateways saved securely' });
     } catch (err) {
         console.error("POST Gateways Error:", err);
         res.status(500).json({ success: false, message: 'Failed to save gateways' });
-    }
-});
-
-// --- 1-CLICK DATABASE FIX ROUTE ---
-app.get('/api/fix-gateways', async (req, res) => {
-    try {
-        await db.query(`
-            CREATE TABLE IF NOT EXISTS payment_gateways (
-                                                            id SERIAL PRIMARY KEY,
-                                                            provider VARCHAR(50),
-                account_number VARCHAR(50),
-                account_type VARCHAR(50),
-                is_active BOOLEAN DEFAULT true
-                );
-        `);
-
-        await db.query('DELETE FROM payment_gateways');
-
-        await db.query(`INSERT INTO payment_gateways (provider, account_number, account_type) VALUES ('bKash', '01611444463', 'Merchant (Make Payment)')`);
-        await db.query(`INSERT INTO payment_gateways (provider, account_number, account_type) VALUES ('Nagad', '01611444463', 'Merchant (Make Payment)')`);
-        await db.query(`INSERT INTO payment_gateways (provider, account_number, account_type) VALUES ('bKash', '01684161644', 'Personal (Send Money)')`);
-        await db.query(`INSERT INTO payment_gateways (provider, account_number, account_type) VALUES ('Nagad', '01684161644', 'Personal (Send Money)')`);
-
-        res.send(`<h1 style="color: green; font-family: sans-serif; text-align: center; margin-top: 50px;">✅ Database Fixed! All 4 Gateways Injected Successfully.</h1><p style="text-align: center; font-family: sans-serif;">You can now close this tab, go back to Lawyer Diary, and click the <b>+ Top Up</b> button!</p>`);
-    } catch (err) {
-        res.send(`<h1 style="color: red;">Error: ${err.message}</h1>`);
     }
 });
 
