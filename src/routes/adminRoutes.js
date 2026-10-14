@@ -387,4 +387,21 @@ router.post('/manual-recharge', async (req, res) => {
     }
 });
 
+// GET /api/admin/payment-webhooks
+router.get('/payment-webhooks', authenticateToken, async (req, res) => {
+    try {
+        // Assuming req.user is verified as an admin in authenticateToken or another middleware
+        const result = await db.query(`
+            SELECT id, sender_number, transaction_id, gateway, amount, status, received_at 
+            FROM payment_webhooks 
+            ORDER BY received_at DESC
+        `);
+
+        res.json({ success: true, logs: result.rows });
+    } catch (err) {
+        console.error('Error fetching webhooks:', err);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+});
+
 module.exports = router;
