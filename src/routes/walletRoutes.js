@@ -209,10 +209,8 @@ router.post('/topup', authenticateToken, async (req, res) => {
     }
 });
 
-// ✨ NEW: POST /verify-manual (Invoked when lawyer clicks CONFIRM in TopUpModal)
+// ✨ UPDATED: POST /verify-manual (Bulletproof version using standard db.query)
 router.post('/verify-manual', authenticateToken, async (req, res) => {
-    // We use db.connect() to handle the database transaction securely
-    const client = await db.connect();
     try {
         const userId = req.user.id;
         const { senderNumber, amount, trxId, gateway } = req.body;
@@ -225,8 +223,6 @@ router.post('/verify-manual', authenticateToken, async (req, res) => {
         const lawyerTrx = trxId.trim().toUpperCase();
         const lawyerAmount = parseFloat(amount);
 
-        await client.query('BEGIN');
-
         // Look for matching row where all 3 values align
         const queryText = `
             SELECT * FROM payment_webhooks
@@ -234,12 +230,10 @@ router.post('/verify-manual', authenticateToken, async (req, res) => {
               AND amount = $2
               AND RIGHT(sender_number, 11) = $3
               AND status = 'WAITING FOR REQ'
-                FOR UPDATE
         `;
-        const result = await client.query(queryText, [lawyerTrx, lawyerAmount, lawyerPhone]);
+        const result = await db.query(queryText, [lawyerTrx, lawyerAmount, lawyerPhone]);
 
         if (result.rows.length === 0) {
-            await client.query('ROLLBACK');
             return res.status(400).json({
                 success: false,
                 message: 'No matching unverified payment found. Verify the TrxID, sending number, and exact amount, or wait a minute if your payment was just completed.'
@@ -249,7 +243,7 @@ router.post('/verify-manual', authenticateToken, async (req, res) => {
         const webhookRow = result.rows[0];
 
         // 1. Mark webhook as SUCCESS
-        await client.query(
+        await db.query(
             `UPDATE payment_webhooks
              SET status = 'SUCCESS', claimed_by_user_id = $1, claimed_at = CURRENT_TIMESTAMP
              WHERE id = $2`,
@@ -257,7 +251,7 @@ router.post('/verify-manual', authenticateToken, async (req, res) => {
         );
 
         // 2. Credit the lawyer's wallet balance
-        await client.query(
+        await db.query(
             `UPDATE users
              SET wallet_balance = COALESCE(wallet_balance, 0) + $1
              WHERE id = $2`,
@@ -265,24 +259,19 @@ router.post('/verify-manual', authenticateToken, async (req, res) => {
         );
 
         // 3. Insert transaction ledger record
-        await client.query(
+        await db.query(
             `INSERT INTO wallet_transactions (user_id, amount, transaction_type, description)
              VALUES ($1, $2, 'TOPUP', $3)`,
-            [userId, lawyerAmount, `${gateway || 'bKash'} Top-Up (TrxID: ${lawyerTrx})`]
+            [String(userId), lawyerAmount, `${gateway || 'bKash'} Top-Up (TrxID: ${lawyerTrx})`]
         );
-
-        await client.query('COMMIT');
 
         return res.json({
             success: true,
             message: `৳${lawyerAmount} credited successfully to your wallet balance.`
         });
     } catch (err) {
-        await client.query('ROLLBACK');
         console.error('verify-manual error:', err);
-        return res.status(500).json({ success: false, message: 'Transaction processing failed.' });
-    } finally {
-        client.release();
+        return res.status(500).json({ success: false, message: 'Transaction failed: ' + err.message });
     }
 });
 
