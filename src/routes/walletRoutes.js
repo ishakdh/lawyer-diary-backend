@@ -33,7 +33,22 @@ const ensureTablesExist = async () => {
                 );
         `);
 
-        // 3. CRITICAL: Inject missing columns into users table if they don't exist
+        // 3. Ensure payment_webhooks table exists for the Android SMS reader
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS payment_webhooks (
+                                                            id SERIAL PRIMARY KEY,
+                                                            sender_number VARCHAR(20) NOT NULL,
+                transaction_id VARCHAR(50) UNIQUE NOT NULL,
+                gateway VARCHAR(20) NOT NULL,
+                amount NUMERIC(10, 2) NOT NULL,
+                status VARCHAR(30) DEFAULT 'WAITING FOR REQ',
+                claimed_by_user_id VARCHAR(255),
+                claimed_at TIMESTAMP,
+                received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+        `);
+
+        // 4. CRITICAL: Inject missing columns into users table if they don't exist
         await db.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS wallet_balance NUMERIC(10,2) DEFAULT 0.00;`);
         await db.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS trial_ends_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`);
         await db.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_code VARCHAR(50);`);
@@ -157,12 +172,12 @@ router.post('/topup', authenticateToken, async (req, res) => {
 
         // 1. Update user wallet balance and push trial expiration forward by 30 days
         const updateQuery = `
-            UPDATE users 
+            UPDATE users
             SET wallet_balance = COALESCE(wallet_balance, 0) + $1,
-                trial_ends_at = CASE 
-                    WHEN trial_ends_at < NOW() THEN NOW() + INTERVAL '30 days'
-                    ELSE trial_ends_at + INTERVAL '30 days'
-                END
+                trial_ends_at = CASE
+                                    WHEN trial_ends_at < NOW() THEN NOW() + INTERVAL '30 days'
+                ELSE trial_ends_at + INTERVAL '30 days'
+            END
             WHERE id = $2
             RETURNING wallet_balance, trial_ends_at;
         `;
@@ -191,6 +206,83 @@ router.post('/topup', authenticateToken, async (req, res) => {
     } catch (error) {
         console.error('[WALLET TOPUP] Error processing top-up:', error);
         res.status(500).json({ success: false, message: 'Server error: ' + error.message });
+    }
+});
+
+// ✨ NEW: POST /verify-manual (Invoked when lawyer clicks CONFIRM in TopUpModal)
+router.post('/verify-manual', authenticateToken, async (req, res) => {
+    // We use db.connect() to handle the database transaction securely
+    const client = await db.connect();
+    try {
+        const userId = req.user.id;
+        const { senderNumber, amount, trxId, gateway } = req.body;
+
+        if (!senderNumber || !amount || !trxId) {
+            return res.status(400).json({ success: false, message: 'Please fill in all 3 fields.' });
+        }
+
+        const lawyerPhone = senderNumber.replace(/[^0-9]/g, '').slice(-11);
+        const lawyerTrx = trxId.trim().toUpperCase();
+        const lawyerAmount = parseFloat(amount);
+
+        await client.query('BEGIN');
+
+        // Look for matching row where all 3 values align
+        const queryText = `
+            SELECT * FROM payment_webhooks
+            WHERE transaction_id = $1
+              AND amount = $2
+              AND RIGHT(sender_number, 11) = $3
+              AND status = 'WAITING FOR REQ'
+                FOR UPDATE
+        `;
+        const result = await client.query(queryText, [lawyerTrx, lawyerAmount, lawyerPhone]);
+
+        if (result.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({
+                success: false,
+                message: 'No matching unverified payment found. Verify the TrxID, sending number, and exact amount, or wait a minute if your payment was just completed.'
+            });
+        }
+
+        const webhookRow = result.rows[0];
+
+        // 1. Mark webhook as SUCCESS
+        await client.query(
+            `UPDATE payment_webhooks
+             SET status = 'SUCCESS', claimed_by_user_id = $1, claimed_at = CURRENT_TIMESTAMP
+             WHERE id = $2`,
+            [userId, webhookRow.id]
+        );
+
+        // 2. Credit the lawyer's wallet balance
+        await client.query(
+            `UPDATE users
+             SET wallet_balance = COALESCE(wallet_balance, 0) + $1
+             WHERE id = $2`,
+            [lawyerAmount, userId]
+        );
+
+        // 3. Insert transaction ledger record
+        await client.query(
+            `INSERT INTO wallet_transactions (user_id, amount, transaction_type, description)
+             VALUES ($1, $2, 'TOPUP', $3)`,
+            [userId, lawyerAmount, `${gateway || 'bKash'} Top-Up (TrxID: ${lawyerTrx})`]
+        );
+
+        await client.query('COMMIT');
+
+        return res.json({
+            success: true,
+            message: `৳${lawyerAmount} credited successfully to your wallet balance.`
+        });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error('verify-manual error:', err);
+        return res.status(500).json({ success: false, message: 'Transaction processing failed.' });
+    } finally {
+        client.release();
     }
 });
 
