@@ -261,8 +261,8 @@ router.post('/verify-manual', authenticateToken, async (req, res) => {
         // 3. Insert transaction ledger record
         await db.query(
             `INSERT INTO wallet_transactions (user_id, amount, transaction_type, description)
-             VALUES ($1, $2, 'TOPUP', $3)`,
-            [String(userId), lawyerAmount, `${gateway || 'bKash'} Top-Up (TrxID: ${lawyerTrx})`]
+             VALUES ($1, $2, 'TOP_UP', $3)`,
+            [userId, lawyerAmount, `${gateway || 'bKash'} Top-Up (TrxID: ${lawyerTrx})`]
         );
 
         return res.json({
