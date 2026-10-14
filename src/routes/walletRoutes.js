@@ -325,4 +325,51 @@ router.get('/fix-all-trials', async (req, res) => {
     }
 });
 
+// POST /api/wallet/purchase-plan - Manual Subscription Purchase
+router.post('/purchase-plan', authenticateToken, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { amount, planType, tierName } = req.body;
+        const cost = parseFloat(amount);
+
+        if (cost <= 0) return res.status(400).json({ success: false, message: 'Invalid plan amount.' });
+
+        // 1. Check user's current balance
+        const userRes = await db.query('SELECT wallet_balance, trial_ends_at FROM users WHERE id = $1', [userId]);
+        const user = userRes.rows[0];
+
+        if (user.wallet_balance < cost) {
+            return res.status(400).json({
+                success: false,
+                message: "You don't have enough balance for it, please recharge."
+            });
+        }
+
+        // 2. Determine extension length
+        const interval = planType === 'annual' ? '1 year' : '1 month';
+
+        // 3. Deduct balance & extend validity safely
+        await db.query(`
+            UPDATE users 
+            SET wallet_balance = wallet_balance - $1,
+                trial_ends_at = CASE 
+                    WHEN trial_ends_at < NOW() THEN NOW() + INTERVAL '${interval}'
+                    ELSE trial_ends_at + INTERVAL '${interval}'
+                END
+            WHERE id = $2
+        `, [cost, userId]);
+
+        // 4. Log the transaction as an expense
+        await db.query(`
+            INSERT INTO wallet_transactions (user_id, amount, transaction_type, description) 
+            VALUES ($1, $2, 'SUBSCRIPTION_FEE', $3)
+        `, [String(userId), -cost, `Purchased ${tierName} (${planType}ly)`]);
+
+        res.json({ success: true, message: `Successfully subscribed to the ${tierName} plan!` });
+    } catch (err) {
+        console.error('[PURCHASE API] Error:', err);
+        res.status(500).json({ success: false, message: 'Server error: ' + err.message });
+    }
+});
+
 module.exports = router;
