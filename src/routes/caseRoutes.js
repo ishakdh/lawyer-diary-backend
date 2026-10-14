@@ -10,7 +10,7 @@ router.put('/:id/hearing', protect, caseController.completeHearing);
 router.put('/:id/transfer', protect, caseController.transferCase);
 router.patch('/:id/toggle-close', protect, caseController.toggleCloseCase);
 
-// FIX: Use a unique route path like '/:id/notes' so it doesn't conflict with router.put('/:id', ...)
+// Specific sub-route MUST come before general /:id route
 router.put('/:id/notes', protect, caseController.updateCaseNotes);
 
 router.put('/:id', protect, caseController.updateCase);

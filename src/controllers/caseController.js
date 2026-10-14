@@ -40,14 +40,13 @@ exports.createCase = async (req, res) => {
             return res.status(400).json({ success: false, message: 'Please provide all required fields.' });
         }
 
-        // Auto-log case creation
         const creationLog = `${getTodayPrefix()} Case Created.`;
         const finalNotes = appendNote(creationLog, notes);
 
         const query = `
             INSERT INTO cases (chamber_owner_id, case_number, section, court_name, client_name, client_phone, opponent_name, next_hearing_date, notes)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            RETURNING *;
+                RETURNING *;
         `;
         const values = [chamber_owner_id, case_number, section || null, court_name, client_name, cleanPhone(client_phone), opponent_name, next_hearing_date || null, finalNotes];
         const result = await db.query(query, values);
@@ -70,13 +69,11 @@ exports.createCase = async (req, res) => {
 // 2. Get all cases
 exports.getCases = async (req, res) => {
     try {
-        // FIX: Ensure lawyerId is properly handled whether it comes in as string or number from the token
         const lawyerId = req.user.id;
 
         const lawyerRes = await db.query('SELECT full_name FROM users WHERE id = $1', [lawyerId]);
-        const lawyerName = lawyerRes.rows.length > 0 ? lawyerRes.rows.length > 0 ? lawyerRes.rows[0].full_name : 'Lawyer' : 'Lawyer';
+        const lawyerName = lawyerRes.rows.length > 0 ? lawyerRes.rows[0].full_name : 'Lawyer';
 
-        // Using coercion/casting in SQL or passing lawyerId safely
         const casesResult = await db.query(
             `SELECT * FROM cases WHERE chamber_owner_id::text = $1::text ORDER BY is_closed ASC, next_hearing_date ASC NULLS LAST`,
             [lawyerId]
@@ -135,7 +132,7 @@ exports.getUpcomingHearings = async (req, res) => {
     }
 };
 
-// 4. Complete Hearing (Auto-logs details & new dates)
+// 4. Complete Hearing
 exports.completeHearing = async (req, res) => {
     try {
         const { id } = req.params;
@@ -147,17 +144,11 @@ exports.completeHearing = async (req, res) => {
 
         const currentCase = caseRes.rows[0];
 
-        // Format diary entry
         let actionNotes = [];
         if (hearing_note) actionNotes.push(`Hearing Details: ${hearing_note}`);
         if (next_hearing_date) actionNotes.push(`Next date scheduled for ${formatHearingDate(next_hearing_date)}`);
 
-        let newDiaryEntry = null;
-        if (actionNotes.length > 0) {
-            newDiaryEntry = `${getTodayPrefix()} ${actionNotes.join(' | ')}`;
-        } else {
-            newDiaryEntry = `${getTodayPrefix()} Hearing completed without specific notes or next date.`;
-        }
+        let newDiaryEntry = actionNotes.length > 0 ? `${getTodayPrefix()} ${actionNotes.join(' | ')}` : `${getTodayPrefix()} Hearing completed without specific notes or next date.`;
 
         const updatedNotes = appendNote(currentCase.notes, newDiaryEntry);
         const newDateVal = next_hearing_date ? next_hearing_date : null;
@@ -172,7 +163,7 @@ exports.completeHearing = async (req, res) => {
         if (ownerId) {
             await db.query(
                 `INSERT INTO activity_logs (user_id, action_type, description) VALUES ($1, $2, $3);`,
-                [ownerId, 'HEARING_COMPLETED', `Completed hearing for case "${updatedCase.case_number}". Next date: ${newDateVal ? formatHearingDate(newDateVal) : 'Not assigned'}`]
+                [ownerId, 'HEARING_COMPLETED', `Completed hearing for case "${updatedCase.case_number}".`]
             );
         }
         res.status(200).json({ success: true, case: updatedCase });
@@ -181,7 +172,7 @@ exports.completeHearing = async (req, res) => {
     }
 };
 
-// 5. Transfer Case (Auto-logs old & new numbers)
+// 5. Transfer Case
 exports.transferCase = async (req, res) => {
     try {
         const { id } = req.params;
@@ -194,12 +185,11 @@ exports.transferCase = async (req, res) => {
         if (oldCaseRes.rows.length === 0) return res.status(404).json({ success: false, message: 'Case not found.' });
         const oldCase = oldCaseRes.rows[0];
 
-        // Format diary entry
         const transferNote = `${getTodayPrefix()} Case Transferred from Old Case No. "${oldCase.case_number}" to New Case No. "${case_number}".`;
         const updatedNotes = appendNote(oldCase.notes, transferNote);
 
         const query = `
-            UPDATE cases 
+            UPDATE cases
             SET old_case_number = case_number,
                 old_court_name = court_name,
                 old_section = section,
@@ -209,7 +199,7 @@ exports.transferCase = async (req, res) => {
                 notes = $4,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $5
-            RETURNING *;
+                RETURNING *;
         `;
         const result = await db.query(query, [case_number, section || null, court_name || null, updatedNotes, id]);
         const updatedCase = result.rows[0];
@@ -228,7 +218,7 @@ exports.transferCase = async (req, res) => {
     }
 };
 
-// 6. Close / Re-Open Case (Auto-logs reason)
+// 6. Close / Re-Open Case
 exports.toggleCloseCase = async (req, res) => {
     try {
         const { id } = req.params;
@@ -244,7 +234,6 @@ exports.toggleCloseCase = async (req, res) => {
         let query, values, actionText;
 
         if (isCurrentlyClosed) {
-            // Re-Open logic
             const reopenNote = `${getTodayPrefix()} Case Re-Opened.`;
             const updatedNotes = appendNote(currentCase.notes, reopenNote);
 
@@ -252,7 +241,6 @@ exports.toggleCloseCase = async (req, res) => {
             values = [updatedNotes, id];
             actionText = 'CASE_REOPENED';
         } else {
-            // Close logic
             const closeNote = `${getTodayPrefix()} Case Closed. Reason: ${close_reason || 'No reason provided.'}`;
             const updatedNotes = appendNote(currentCase.notes, closeNote);
 
@@ -319,13 +307,13 @@ exports.deleteCase = async (req, res) => {
     }
 };
 
+// 9. Update case notes (FIXED: Properly exported and querying chamber_owner_id)
 exports.updateCaseNotes = async (req, res) => {
-    const { id } = req.params;
-    const { notes } = req.body;
-    const lawyerId = req.user.id;
-
     try {
-        // FIX: Use chamber_owner_id instead of user_id to match your database schema
+        const { id } = req.params;
+        const { notes } = req.body;
+        const lawyerId = req.user.id;
+
         const result = await db.query(
             'UPDATE cases SET notes = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND chamber_owner_id::text = $3::text RETURNING *',
             [notes, id, lawyerId]
