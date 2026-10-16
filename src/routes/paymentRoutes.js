@@ -21,7 +21,7 @@ router.post('/sync-sms', async (req, res) => {
     try {
         const { secret_key, senderNumber, trxId, amount, gateway } = req.body;
 
-        if (secret_key !== 'Raihan@!1611') {
+        if (secret_key !== process.env.SMS_WEBHOOK_SECRET) {
             return res.status(403).json({ success: false, message: 'Invalid secret key' });
         }
 
