@@ -164,26 +164,27 @@ router.get('/finance', async (req, res) => {
         let queryParams = [];
 
         if (start_date && end_date) {
-            dateFilter = 'AND p.created_at >= $1 AND p.created_at <= $2::timestamp + interval \'1 day\'';
+            dateFilter = 'AND t.created_at >= $1 AND t.created_at <= $2::timestamp + interval \'1 day\'';
             queryParams = [start_date, end_date];
         }
 
-        // Aggregate Stats
+        // Aggregate Stats (Only calculate TOP_UPs to avoid counting deductions)
         const statsRes = await db.query(`
             SELECT
                 COALESCE(SUM(CASE WHEN created_at >= CURRENT_DATE THEN amount ELSE 0 END), 0) as today,
                 COALESCE(SUM(CASE WHEN created_at >= CURRENT_DATE - INTERVAL '15 days' THEN amount ELSE 0 END), 0) as last_15_days,
                 COALESCE(SUM(CASE WHEN date_trunc('month', created_at) = date_trunc('month', CURRENT_DATE) THEN amount ELSE 0 END), 0) as this_month
-            FROM subscription_payments p
+            FROM wallet_transactions
+            WHERE transaction_type = 'TOP_UP'
         `);
 
-        // Transaction Table
+        // Transaction Table (Linking the wallet transactions to the user details)
         const tableRes = await db.query(`
-            SELECT p.*, u.full_name, u.phone_number
-            FROM subscription_payments p
-                     JOIN users u ON p.user_id = u.id
-            WHERE 1=1 ${dateFilter}
-            ORDER BY p.created_at DESC
+            SELECT t.id, t.amount, t.description AS transaction_id, 'Wallet Recharge' AS gateway_used, t.created_at, u.full_name, u.phone_number
+            FROM wallet_transactions t
+                     JOIN users u ON t.user_id::text = u.id::text
+            WHERE t.transaction_type = 'TOP_UP' ${dateFilter}
+            ORDER BY t.created_at DESC
         `, queryParams);
 
         res.json({ success: true, stats: statsRes.rows[0], transactions: tableRes.rows });
@@ -253,10 +254,10 @@ router.get('/users/:id/details', async (req, res) => {
         let payments = [];
         try {
             const payRes = await db.query(`
-                SELECT id, amount, gateway_used, transaction_id, created_at, 'RECHARGE' as type
-                FROM subscription_payments
-                WHERE user_id = $1;
-            `, [id]);
+                SELECT id, amount, 'Wallet' as gateway_used, description as transaction_id, created_at, 'RECHARGE' as type
+                FROM wallet_transactions
+                WHERE user_id = $1 AND transaction_type = 'TOP_UP';
+            `, [String(id)]);
             payments = payRes.rows;
         } catch (e) {}
 
@@ -367,12 +368,12 @@ router.post('/manual-recharge', async (req, res) => {
             WHERE id = $2
         `, [amount, target_user_id]);
 
-        // 2. Record the transaction for the Financial Ledger
+        // 2. Record the transaction for the Financial Ledger in the correct wallet table!
         const txnId = 'MANUAL-' + Math.random().toString(36).substr(2, 9).toUpperCase();
         await db.query(`
-            INSERT INTO subscription_payments (user_id, amount, gateway_used, transaction_id)
-            VALUES ($1, $2, 'Manual Admin Recharge', $3)
-        `, [target_user_id, amount, txnId]);
+            INSERT INTO wallet_transactions (user_id, amount, transaction_type, description)
+            VALUES ($1, $2, 'TOP_UP', $3)
+        `, [String(target_user_id), amount, `Manual Admin Recharge (TxnID: ${txnId})`]);
 
         // 3. Log the Admin action
         await db.query(`
