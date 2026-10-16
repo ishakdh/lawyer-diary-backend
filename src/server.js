@@ -120,7 +120,7 @@ app.get('/api/gateways', async (req, res) => {
         res.json({ success: true, gateways: result.rows });
     } catch (err) {
         console.error("GET Gateways Error:", err);
-        res.status(500).json({ success: false, message: 'Failed to fetch gateways' });
+        res.status(500).json({ success: false, message: 'Failed to fetch gateways. Please try again later.' });
     }
 });
 
@@ -145,11 +145,9 @@ app.post('/api/gateways/save', verifyAdmin, async (req, res) => {
         res.json({ success: true, message: 'Gateways saved securely' });
     } catch (err) {
         console.error("POST Gateways Error:", err);
-        res.status(500).json({ success: false, message: 'Failed to save gateways' });
+        res.status(500).json({ success: false, message: 'Failed to save gateways. Please try again later.' });
     }
 });
-
-
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {

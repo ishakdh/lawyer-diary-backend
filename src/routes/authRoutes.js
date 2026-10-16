@@ -162,3 +162,5 @@ router.post('/reset-password', async (req, res) => {
         res.json({ success: true, message: 'Password updated successfully.' });
     } catch (err) { res.status(500).json({ success: false, message: 'Server error resetting password.' }); }
 });
+
+module.exports = router;
