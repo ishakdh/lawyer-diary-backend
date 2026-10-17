@@ -54,10 +54,10 @@ function saveToCache(key, value) {
     analysisCache.set(key, value);
 }
 
-// 2. ULTRA-FAST FAILOVER ENGINE
-const FREE_MODELS = ['gemini-1.5-flash', 'gemini-1.5-flash-8b'];
+// 2. ULTRA-FAST FAILOVER ENGINE (Using Correct Gemini 2.0 Models)
+const FREE_MODELS = ['gemini-2.0-flash', 'gemini-2.0-flash-lite'];
 
-async function generateWithFailover(contents, preferredModel = 'gemini-1.5-flash') {
+async function generateWithFailover(contents, preferredModel = 'gemini-2.0-flash') {
     const totalKeys = GEMINI_KEYS.length;
     if (totalKeys === 0) throw new Error('No Gemini API keys configured on server.');
 
@@ -146,7 +146,6 @@ Format your analysis covering:
 - MISSING OR REQUIRED NEXT DOCUMENTS
 `;
 
-    // Properly format inline image parts
     const imageParts = images
         .filter(img => img && img.base64)
         .map(img => {
@@ -165,8 +164,7 @@ Format your analysis covering:
 
     const contents = [{ role: 'user', parts: [{ text: legalPrompt }, ...imageParts] }];
 
-    // Execute and catch real errors to debug if anything fails
-    const result = await generateWithFailover(contents, 'gemini-1.5-flash');
+    const result = await generateWithFailover(contents, 'gemini-2.0-flash');
 
     saveToCache(cacheKey, result.text);
     db.query('INSERT INTO ai_usage_logs (user_id, charged_amount) VALUES ($1, $2)', [String(userId), 0.00]).catch(() => {});
@@ -204,7 +202,6 @@ router.post('/chat', authenticateToken, async (req, res) => {
         userParts.push({ text: `\nAdvocate's Question: ${newMessage.trim()}` });
     }
 
-    // Properly parse and attach audio bytes
     if (newAudio && newAudio.length > 0) {
         const parts = newAudio.split(';base64,');
         if (parts.length === 2) {
@@ -222,7 +219,7 @@ router.post('/chat', authenticateToken, async (req, res) => {
     }
 
     const contents = [{ role: 'user', parts: userParts }];
-    const result = await generateWithFailover(contents, 'gemini-1.5-flash');
+    const result = await generateWithFailover(contents, 'gemini-2.0-flash-lite');
 
     return res.json({ success: true, reply: result.text });
 });
