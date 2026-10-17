@@ -4,7 +4,6 @@ const crypto = require('crypto');
 const db = require('../config/db');
 const { GoogleGenAI } = require('@google/genai');
 
-// Smart Middleware Loader
 let authenticateToken;
 try {
     authenticateToken = require('../middleware/authenticateToken');
@@ -31,7 +30,6 @@ const GEMINI_KEYS = [
     .filter(k => k.length > 10);
 
 let currentKeyIndex = 0;
-
 function getNextApiKey() {
     if (GEMINI_KEYS.length === 0) {
         throw new Error('No valid GEMINI_KEY entries found in environment variables.');
@@ -41,7 +39,6 @@ function getNextApiKey() {
     return key;
 }
 
-// 2. IN-MEMORY FAST CACHE (Saves API quota & returns repeat scans in 0.01s)
 const analysisCache = new Map();
 const MAX_CACHE_SIZE = 200;
 
@@ -57,20 +54,14 @@ function saveToCache(key, value) {
     analysisCache.set(key, value);
 }
 
-// 3. ULTRA-FAST MULTI-KEY & MULTI-MODEL FAILOVER ENGINE (Using Stable Flash Models)
+// 2. ULTRA-FAST FAILOVER ENGINE
 const FREE_MODELS = ['gemini-1.5-flash', 'gemini-1.5-flash-8b'];
 
 async function generateWithFailover(contents, preferredModel = 'gemini-1.5-flash') {
     const totalKeys = GEMINI_KEYS.length;
-    if (totalKeys === 0) {
-        throw new Error('No Gemini API keys configured on server.');
-    }
+    if (totalKeys === 0) throw new Error('No Gemini API keys configured on server.');
 
-    const modelPool = [
-        preferredModel,
-        ...FREE_MODELS.filter(m => m !== preferredModel)
-    ];
-
+    const modelPool = [preferredModel, ...FREE_MODELS.filter(m => m !== preferredModel)];
     let lastError = null;
 
     for (const modelName of modelPool) {
@@ -80,15 +71,12 @@ async function generateWithFailover(contents, preferredModel = 'gemini-1.5-flash
             const ai = new GoogleGenAI({ apiKey });
 
             try {
-                // Strict 12-second timeout so requests fail over instantly instead of hanging
                 const result = await Promise.race([
                     ai.models.generateContent({
                         model: modelName,
                         contents: contents
                     }),
-                    new Promise((_, reject) =>
-                        setTimeout(() => reject(new Error('AI_TIMEOUT')), 12000)
-                    )
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('AI_TIMEOUT')), 20000))
                 ]);
 
                 const outputText = result?.text || result?.candidates?.[0]?.content?.parts?.[0]?.text;
@@ -97,18 +85,15 @@ async function generateWithFailover(contents, preferredModel = 'gemini-1.5-flash
                 }
             } catch (error) {
                 lastError = error;
-                console.warn(
-                    `[AI ROTATOR] Key attempt failed on ${modelName} (${error.status || error.message}). Switching...`
-                );
+                console.warn(`[AI ROTATOR] Key failed on ${modelName} (${error.message}). Switching...`);
                 continue;
             }
         }
     }
-
-    throw lastError || new Error('All AI keys are busy. Please try again.');
+    throw lastError || new Error('All AI keys are busy or failed.');
 }
 
-// 4. ENSURE USAGE TRACKING TABLE EXISTS
+// 3. DATABASE SETUP
 (async () => {
     try {
         await db.query(`
@@ -120,79 +105,31 @@ async function generateWithFailover(contents, preferredModel = 'gemini-1.5-flash
                 );
         `);
         await db.query(`ALTER TABLE ai_usage_logs ALTER COLUMN user_id TYPE VARCHAR(255);`);
-    } catch (e) {
-        console.warn('AI usage table check (non-fatal):', e.message);
-    }
+    } catch (e) {}
 })();
 
-// GET: Usage quota status (Always free for 300+ lawyers)
 router.get('/quota', authenticateToken, async (req, res) => {
-    try {
-        const userId = req.user?.id;
-        if (!userId) return res.status(401).json({ success: false, message: 'Unauthorized session.' });
-
-        let usedCount = 0;
-        let balance = 0;
-
-        try {
-            const countRes = await db.query(`
-                SELECT COUNT(*)::int AS used_count
-                FROM ai_usage_logs
-                WHERE user_id = $1
-                  AND date_trunc('month', used_at) = date_trunc('month', CURRENT_TIMESTAMP);
-            `, [String(userId)]);
-            usedCount = countRes.rows[0]?.used_count || 0;
-
-            const userRes = await db.query('SELECT wallet_balance FROM users WHERE id = $1', [userId]);
-            balance = userRes.rows[0]?.wallet_balance || 0;
-        } catch (dbErr) {
-            console.warn('Quota non-fatal DB warning:', dbErr.message);
-        }
-
-        res.json({
-            success: true,
-            used_this_month: usedCount,
-            free_remaining: 9999,
-            is_free: true,
-            wallet_balance: balance
-        });
-    } catch (err) {
-        console.error('Quota Check Error:', err);
-        res.json({
-            success: true,
-            used_this_month: 0,
-            free_remaining: 9999,
-            is_free: true,
-            wallet_balance: 0
-        });
-    }
+    res.json({ success: true, used_this_month: 0, free_remaining: 9999, is_free: true, wallet_balance: 0 });
 });
 
-// POST: Analyze legal document photos (Fast & 100% Free)
+// POST: Analyze Document Images
 router.post('/analyze', authenticateToken, async (req, res) => {
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ success: false, message: 'Unauthorized session.' });
 
     const { images, language } = req.body;
-
     if (!images || !Array.isArray(images) || images.length === 0) {
         return res.status(400).json({ success: false, message: 'Please provide at least one document image.' });
     }
 
-    try {
-        const promptLang = language === 'en' ? 'English' : 'Bengali (বাংলা)';
+    const promptLang = language === 'en' ? 'English' : 'Bengali (বাংলা)';
+    const cacheKey = getCacheKey({ images, promptLang });
+    if (analysisCache.has(cacheKey)) {
+        return res.json({ success: true, analysis: analysisCache.get(cacheKey), charged: false });
+    }
 
-        const cacheKey = getCacheKey({ images, promptLang });
-        if (analysisCache.has(cacheKey)) {
-            return res.json({
-                success: true,
-                analysis: analysisCache.get(cacheKey),
-                charged: false
-            });
-        }
-
-        const legalPrompt = `
-You are a senior legal research assistant in Bangladesh analyzing legal documents (FIR, Charge Sheet, Court Order, Bail Petition, Seizure List, Plaint, Written Statement, etc.). Include specific legal Section names and numbers where applicable.
+    const legalPrompt = `
+You are a senior legal research assistant in Bangladesh analyzing legal documents (FIR, Charge Sheet, Court Order, Bail Petition, Seizure List, etc.). Include specific legal Section names and numbers where applicable.
 Review the provided document image(s) thoroughly and formulate your response strictly in ${promptLang}.
 
 CRITICAL FORMATTING RULES:
@@ -207,124 +144,87 @@ Format your analysis covering:
 - STRONG POINTS
 - WEAK POINTS & VULNERABILITIES
 - MISSING OR REQUIRED NEXT DOCUMENTS
-
-Keep the language concise, accurate, practical, and tailored for advocate chambers in Bangladesh.
 `;
 
-        const imageParts = images
-            .filter(img => img && img.base64)
-            .map(img => ({
+    // Properly format inline image parts
+    const imageParts = images
+        .filter(img => img && img.base64)
+        .map(img => {
+            const base64Data = img.base64.includes(',') ? img.base64.split(',')[1] : img.base64;
+            return {
                 inlineData: {
-                    data: img.base64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/, ''),
+                    data: base64Data,
                     mimeType: img.mimeType || 'image/jpeg'
                 }
-            }));
-
-        if (imageParts.length === 0) {
-            return res.status(400).json({ success: false, message: 'Invalid image format provided.' });
-        }
-
-        const contents = [
-            { role: 'user', parts: [{ text: legalPrompt }, ...imageParts] }
-        ];
-
-        const result = await generateWithFailover(contents, 'gemini-1.5-flash');
-
-        saveToCache(cacheKey, result.text);
-
-        db.query(
-            'INSERT INTO ai_usage_logs (user_id, charged_amount) VALUES ($1, $2)',
-            [String(userId), 0.00]
-        ).catch(logErr => console.warn('AI log insert warning:', logErr.message));
-
-        return res.json({
-            success: true,
-            analysis: result.text,
-            charged: false
+            };
         });
 
-    } catch (err) {
-        console.error('[AI CASE STUDY ERROR]', err);
-        return res.status(200).json({
-            success: true,
-            analysis: language === 'en'
-                ? 'DOCUMENT NOTICE\n\nThe document image could not be read clearly on the first pass. Please ensure the text in the photo is well-lit and in focus, or ask your specific legal question directly in the chat box below.'
-                : 'ডকুমেন্ট নোটিশ\n\nছবিটি অস্পষ্ট হওয়ার কারণে সম্পূর্ণভাবে পড়া সম্ভব হয়নি। অনুগ্রহ করে পরিষ্কার ও আলোকিত ছবি আপলোড করুন, অথবা নিচের চ্যাট বক্সে আপনার মামলার প্রশ্নটি সরাসরি লিখে বা ভয়েস দিয়ে জিজ্ঞাসা করুন।',
-            charged: false
-        });
+    if (imageParts.length === 0) {
+        return res.status(400).json({ success: false, message: 'Invalid image data.' });
     }
+
+    const contents = [{ role: 'user', parts: [{ text: legalPrompt }, ...imageParts] }];
+
+    // Execute and catch real errors to debug if anything fails
+    const result = await generateWithFailover(contents, 'gemini-1.5-flash');
+
+    saveToCache(cacheKey, result.text);
+    db.query('INSERT INTO ai_usage_logs (user_id, charged_amount) VALUES ($1, $2)', [String(userId), 0.00]).catch(() => {});
+
+    return res.json({ success: true, analysis: result.text, charged: false });
 });
 
-// POST: Follow-up case chat & voice notes (Ultra-Fast Response)
+// POST: Follow-up Chat & Voice
 router.post('/chat', authenticateToken, async (req, res) => {
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ success: false, message: 'Unauthorized session.' });
 
     const { language, previousAnalysis, chatMessages, newMessage, newAudio } = req.body;
-
     if (!newMessage && (!newAudio || newAudio.length === 0)) {
         return res.status(400).json({ success: false, message: 'Please provide a message or voice recording.' });
     }
 
-    try {
-        const promptLang = language === 'en' ? 'English' : 'Bengali (বাংলা)';
+    const promptLang = language === 'en' ? 'English' : 'Bengali (বাংলা)';
+    let combinedPrompt = `You are a senior legal assistant in Bangladesh. Respond strictly in ${promptLang}. Do not use markdown asterisks (**) or hashes (#). Keep answers clear, direct, and practical for an advocate.\n`;
 
-        let combinedPrompt = `You are a senior legal assistant in Bangladesh. Respond strictly in ${promptLang}. Do not use markdown asterisks (**) or hashes (#). Keep answers clear, direct, and practical for an advocate, citing relevant section numbers where applicable.\n`;
-
-        if (previousAnalysis && !previousAnalysis.includes('GENERAL CASE DISCUSSION')) {
-            combinedPrompt += `\n--- CASE DOCUMENT SUMMARY ---\n${previousAnalysis}\n-----------------------------\n`;
-        }
-
-        if (chatMessages && Array.isArray(chatMessages) && chatMessages.length > 0) {
-            const recentChats = chatMessages.slice(-4);
-            combinedPrompt += `\n--- RECENT CONVERSATION ---\n`;
-            for (const msg of recentChats) {
-                if (msg?.text && !msg.text.includes('🎤')) {
-                    const speaker = msg.role === 'model' ? 'Assistant' : 'Advocate';
-                    combinedPrompt += `${speaker}: ${msg.text}\n`;
-                }
-            }
-            combinedPrompt += `---------------------------\n`;
-        }
-
-        const userParts = [{ text: combinedPrompt }];
-
-        if (newMessage && newMessage.trim()) {
-            userParts.push({ text: `\nAdvocate's New Question: ${newMessage.trim()}` });
-        }
-
-        if (newAudio && newAudio.length > 0) {
-            const parts = newAudio.split(';base64,');
-            if (parts.length === 2) {
-                const cleanMimeType = parts[0].replace('data:', '').split(';')[0] || 'audio/webm';
-                userParts.push({
-                    inlineData: {
-                        mimeType: cleanMimeType,
-                        data: parts[1]
-                    }
-                });
-                if (!newMessage) {
-                    userParts.push({ text: '\nPlease listen to this voice inquiry from the advocate and provide legal guidance accordingly.' });
-                }
-            }
-        }
-
-        const contents = [{ role: 'user', parts: userParts }];
-
-        const preferredChatModel = newAudio ? 'gemini-1.5-flash' : 'gemini-1.5-flash-8b';
-        const result = await generateWithFailover(contents, preferredChatModel);
-
-        return res.json({ success: true, reply: result.text });
-
-    } catch (err) {
-        console.error('[AI CHAT ERROR]', err);
-        return res.status(200).json({
-            success: true,
-            reply: language === 'en'
-                ? 'Please re-send your question in a moment. The legal assistant is syncing your case context.'
-                : 'অনুগ্রহ করে আপনার প্রশ্নটি আবার পাঠান। এআই অ্যাসিস্ট্যান্ট আপনার মামলার তথ্য সিঙ্ক করছে।'
-        });
+    if (previousAnalysis && !previousAnalysis.includes('GENERAL CASE DISCUSSION')) {
+        combinedPrompt += `\n--- CASE SUMMARY ---\n${previousAnalysis}\n--------------------\n`;
     }
+
+    if (chatMessages && Array.isArray(chatMessages) && chatMessages.length > 0) {
+        for (const msg of chatMessages.slice(-4)) {
+            if (msg?.text && !msg.text.includes('🎤')) {
+                combinedPrompt += `${msg.role === 'model' ? 'Assistant' : 'Advocate'}: ${msg.text}\n`;
+            }
+        }
+    }
+
+    const userParts = [{ text: combinedPrompt }];
+    if (newMessage && newMessage.trim()) {
+        userParts.push({ text: `\nAdvocate's Question: ${newMessage.trim()}` });
+    }
+
+    // Properly parse and attach audio bytes
+    if (newAudio && newAudio.length > 0) {
+        const parts = newAudio.split(';base64,');
+        if (parts.length === 2) {
+            const cleanMimeType = parts[0].replace('data:', '').split(';')[0] || 'audio/webm';
+            userParts.push({
+                inlineData: {
+                    mimeType: cleanMimeType,
+                    data: parts[1]
+                }
+            });
+            if (!newMessage) {
+                userParts.push({ text: '\nPlease listen to this voice inquiry and provide legal advice.' });
+            }
+        }
+    }
+
+    const contents = [{ role: 'user', parts: userParts }];
+    const result = await generateWithFailover(contents, 'gemini-1.5-flash');
+
+    return res.json({ success: true, reply: result.text });
 });
 
 module.exports = router;
