@@ -54,10 +54,10 @@ function saveToCache(key, value) {
     analysisCache.set(key, value);
 }
 
-// 2. ULTRA-FAST FAILOVER ENGINE (Using Correct Gemini 2.0 Models)
-const FREE_MODELS = ['gemini-2.0-flash', 'gemini-2.0-flash-lite'];
+// 2. ULTRA-FAST FAILOVER ENGINE (Using Updated Gemini 3 Models)
+const FREE_MODELS = ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-3.6-flash'];
 
-async function generateWithFailover(contents, preferredModel = 'gemini-2.0-flash') {
+async function generateWithFailover(contents, preferredModel = 'gemini-3.8-flash') {
     const totalKeys = GEMINI_KEYS.length;
     if (totalKeys === 0) throw new Error('No Gemini API keys configured on server.');
 
@@ -164,7 +164,7 @@ Format your analysis covering:
 
     const contents = [{ role: 'user', parts: [{ text: legalPrompt }, ...imageParts] }];
 
-    const result = await generateWithFailover(contents, 'gemini-2.0-flash');
+    const result = await generateWithFailover(contents, 'gemini-3.8-flash');
 
     saveToCache(cacheKey, result.text);
     db.query('INSERT INTO ai_usage_logs (user_id, charged_amount) VALUES ($1, $2)', [String(userId), 0.00]).catch(() => {});
@@ -172,14 +172,14 @@ Format your analysis covering:
     return res.json({ success: true, analysis: result.text, charged: false });
 });
 
-// POST: Follow-up Chat & Voice
+// POST: Follow-up Chat & Voice (Text)
 router.post('/chat', authenticateToken, async (req, res) => {
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ success: false, message: 'Unauthorized session.' });
 
-    const { language, previousAnalysis, chatMessages, newMessage, newAudio } = req.body;
-    if (!newMessage && (!newAudio || newAudio.length === 0)) {
-        return res.status(400).json({ success: false, message: 'Please provide a message or voice recording.' });
+    const { language, previousAnalysis, chatMessages, newMessage } = req.body;
+    if (!newMessage) {
+        return res.status(400).json({ success: false, message: 'Please provide a message.' });
     }
 
     const promptLang = language === 'en' ? 'English' : 'Bengali (বাংলা)';
@@ -191,35 +191,16 @@ router.post('/chat', authenticateToken, async (req, res) => {
 
     if (chatMessages && Array.isArray(chatMessages) && chatMessages.length > 0) {
         for (const msg of chatMessages.slice(-4)) {
-            if (msg?.text && !msg.text.includes('🎤')) {
+            if (msg?.text) {
                 combinedPrompt += `${msg.role === 'model' ? 'Assistant' : 'Advocate'}: ${msg.text}\n`;
             }
         }
     }
 
-    const userParts = [{ text: combinedPrompt }];
-    if (newMessage && newMessage.trim()) {
-        userParts.push({ text: `\nAdvocate's Question: ${newMessage.trim()}` });
-    }
+    combinedPrompt += `\nAdvocate's Question: ${newMessage.trim()}`;
 
-    if (newAudio && newAudio.length > 0) {
-        const parts = newAudio.split(';base64,');
-        if (parts.length === 2) {
-            const cleanMimeType = parts[0].replace('data:', '').split(';')[0] || 'audio/webm';
-            userParts.push({
-                inlineData: {
-                    mimeType: cleanMimeType,
-                    data: parts[1]
-                }
-            });
-            if (!newMessage) {
-                userParts.push({ text: '\nPlease listen to this voice inquiry and provide legal advice.' });
-            }
-        }
-    }
-
-    const contents = [{ role: 'user', parts: userParts }];
-    const result = await generateWithFailover(contents, 'gemini-2.0-flash-lite');
+    const contents = [{ role: 'user', parts: [{ text: combinedPrompt }] }];
+    const result = await generateWithFailover(contents, 'gemini-3.5-flash-lite');
 
     return res.json({ success: true, reply: result.text });
 });
