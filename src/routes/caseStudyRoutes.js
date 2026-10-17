@@ -24,7 +24,7 @@ const GEMINI_KEYS = [
     process.env.GEMINI_KEY_22, process.env.GEMINI_KEY_23, process.env.GEMINI_KEY_24,
     process.env.GEMINI_KEY_25, process.env.GEMINI_KEY_26, process.env.GEMINI_KEY_27,
     process.env.GEMINI_KEY_28, process.env.GEMINI_KEY_29, process.env.GEMINI_KEY_30,
-    process.env.GEMINI_API_KEY // Fallback if single key is also defined
+    process.env.GEMINI_API_KEY
 ]
     .filter(Boolean)
     .map(k => k.trim().replace(/^["']|["']$/g, ''))
@@ -57,16 +57,15 @@ function saveToCache(key, value) {
     analysisCache.set(key, value);
 }
 
-// 3. ULTRA-FAST MULTI-KEY & MULTI-MODEL FAILOVER ENGINE
-const FREE_MODELS = ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-3.6-flash'];
+// 3. ULTRA-FAST MULTI-KEY & MULTI-MODEL FAILOVER ENGINE (Using Stable Flash Models)
+const FREE_MODELS = ['gemini-1.5-flash', 'gemini-1.5-flash-8b'];
 
-async function generateWithFailover(contents, preferredModel = 'gemini-3.8-flash') {
+async function generateWithFailover(contents, preferredModel = 'gemini-1.5-flash') {
     const totalKeys = GEMINI_KEYS.length;
     if (totalKeys === 0) {
         throw new Error('No Gemini API keys configured on server.');
     }
 
-    // Order models so preferredModel runs first, followed by backup free models
     const modelPool = [
         preferredModel,
         ...FREE_MODELS.filter(m => m !== preferredModel)
@@ -74,21 +73,21 @@ async function generateWithFailover(contents, preferredModel = 'gemini-3.8-flash
 
     let lastError = null;
 
-    // Try across keys and free models so a single bad key or busy model never stops the user
     for (const modelName of modelPool) {
-        for (let attempt = 0; attempt < totalKeys; attempt++) {
+        for (let attempt = 0; attempt < Math.min(totalKeys, 6); attempt++) {
             const apiKey = getNextApiKey();
+            if (!apiKey) continue;
             const ai = new GoogleGenAI({ apiKey });
 
             try {
-                // 25-second timeout guard per attempt so slow requests switch keys quickly
+                // Strict 12-second timeout so requests fail over instantly instead of hanging
                 const result = await Promise.race([
                     ai.models.generateContent({
                         model: modelName,
                         contents: contents
                     }),
                     new Promise((_, reject) =>
-                        setTimeout(() => reject(new Error('AI_TIMEOUT')), 25000)
+                        setTimeout(() => reject(new Error('AI_TIMEOUT')), 12000)
                     )
                 ]);
 
@@ -99,15 +98,14 @@ async function generateWithFailover(contents, preferredModel = 'gemini-3.8-flash
             } catch (error) {
                 lastError = error;
                 console.warn(
-                    `[AI ROTATOR] Key attempt ${attempt + 1}/${totalKeys} on ${modelName} failed (${error.status || error.message}). Switching key...`
+                    `[AI ROTATOR] Key attempt failed on ${modelName} (${error.status || error.message}). Switching...`
                 );
-                // Always continue to the next key regardless of error type (429, 503, 400, timeout)
                 continue;
             }
         }
     }
 
-    throw lastError || new Error('All AI keys and backup models are currently busy.');
+    throw lastError || new Error('All AI keys are busy. Please try again.');
 }
 
 // 4. ENSURE USAGE TRACKING TABLE EXISTS
@@ -151,7 +149,6 @@ router.get('/quota', authenticateToken, async (req, res) => {
             console.warn('Quota non-fatal DB warning:', dbErr.message);
         }
 
-        // Always return high free_remaining so lawyers are never blocked or charged
         res.json({
             success: true,
             used_this_month: usedCount,
@@ -161,7 +158,6 @@ router.get('/quota', authenticateToken, async (req, res) => {
         });
     } catch (err) {
         console.error('Quota Check Error:', err);
-        // Never block the UI even if DB hiccups
         res.json({
             success: true,
             used_this_month: 0,
@@ -186,7 +182,6 @@ router.post('/analyze', authenticateToken, async (req, res) => {
     try {
         const promptLang = language === 'en' ? 'English' : 'Bengali (বাংলা)';
 
-        // 1. Check Instant Cache first
         const cacheKey = getCacheKey({ images, promptLang });
         if (analysisCache.has(cacheKey)) {
             return res.json({
@@ -197,7 +192,7 @@ router.post('/analyze', authenticateToken, async (req, res) => {
         }
 
         const legalPrompt = `
-You are a senior legal research assistant in Bangladesh analyzing legal documents (FIR, Charge Sheet, Court Order, Bail Petition, Seizure List, Plaint, Written Statement, etc.).
+You are a senior legal research assistant in Bangladesh analyzing legal documents (FIR, Charge Sheet, Court Order, Bail Petition, Seizure List, Plaint, Written Statement, etc.). Include specific legal Section names and numbers where applicable.
 Review the provided document image(s) thoroughly and formulate your response strictly in ${promptLang}.
 
 CRITICAL FORMATTING RULES:
@@ -208,6 +203,7 @@ CRITICAL FORMATTING RULES:
 Format your analysis covering:
 - DOCUMENT CLASSIFICATION
 - CORE SUMMARY
+- RELEVANT LEGAL SECTIONS & ACTS
 - STRONG POINTS
 - WEAK POINTS & VULNERABILITIES
 - MISSING OR REQUIRED NEXT DOCUMENTS
@@ -232,13 +228,10 @@ Keep the language concise, accurate, practical, and tailored for advocate chambe
             { role: 'user', parts: [{ text: legalPrompt }, ...imageParts] }
         ];
 
-        // 2. Execute through the multi-key & multi-model failover engine
-        const result = await generateWithFailover(contents, 'gemini-3.8-flash');
+        const result = await generateWithFailover(contents, 'gemini-1.5-flash');
 
-        // 3. Save to cache for instant future loads
         saveToCache(cacheKey, result.text);
 
-        // 4. Log usage asynchronously (non-blocking so response returns faster)
         db.query(
             'INSERT INTO ai_usage_logs (user_id, charged_amount) VALUES ($1, $2)',
             [String(userId), 0.00]
@@ -276,8 +269,7 @@ router.post('/chat', authenticateToken, async (req, res) => {
     try {
         const promptLang = language === 'en' ? 'English' : 'Bengali (বাংলা)';
 
-        // Build a single consolidated context block to avoid consecutive-role API errors and speed up inference
-        let combinedPrompt = `You are a senior legal assistant in Bangladesh. Respond strictly in ${promptLang}. Do not use markdown asterisks (**) or hashes (#). Keep answers clear, direct, and practical for an advocate.\n`;
+        let combinedPrompt = `You are a senior legal assistant in Bangladesh. Respond strictly in ${promptLang}. Do not use markdown asterisks (**) or hashes (#). Keep answers clear, direct, and practical for an advocate, citing relevant section numbers where applicable.\n`;
 
         if (previousAnalysis && !previousAnalysis.includes('GENERAL CASE DISCUSSION')) {
             combinedPrompt += `\n--- CASE DOCUMENT SUMMARY ---\n${previousAnalysis}\n-----------------------------\n`;
@@ -319,8 +311,7 @@ router.post('/chat', authenticateToken, async (req, res) => {
 
         const contents = [{ role: 'user', parts: userParts }];
 
-        // Use gemini-3.5-flash-lite first for chat if no audio is attached for 2x faster replies, or gemini-3.8-flash for voice
-        const preferredChatModel = newAudio ? 'gemini-3.8-flash' : 'gemini-3.5-flash-lite';
+        const preferredChatModel = newAudio ? 'gemini-1.5-flash' : 'gemini-1.5-flash-8b';
         const result = await generateWithFailover(contents, preferredChatModel);
 
         return res.json({ success: true, reply: result.text });
