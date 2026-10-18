@@ -54,7 +54,7 @@ function saveToCache(key, value) {
     analysisCache.set(key, value);
 }
 
-// 2. ULTRA-FAST FAILOVER ENGINE (Using Updated Gemini 3 Models)
+// 2. ULTRA-FAST FAILOVER ENGINE (Using Updated Gemini Models)
 const FREE_MODELS = ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-3.6-flash'];
 
 async function generateWithFailover(contents, preferredModel = 'gemini-3.8-flash') {
@@ -112,21 +112,31 @@ async function generateWithFailover(contents, preferredModel = 'gemini-3.8-flash
 router.get('/quota', authenticateToken, async (req, res) => {
     const userId = req.user?.id;
     try {
-        // 1. Calculate how many cases were analyzed THIS month
         const usageQuery = await db.query(`
-            SELECT COUNT(*) as total_used 
-            FROM ai_usage_logs 
-            WHERE user_id = $1 
-            AND EXTRACT(MONTH FROM used_at) = EXTRACT(MONTH FROM CURRENT_DATE)
-            AND EXTRACT(YEAR FROM used_at) = EXTRACT(YEAR FROM CURRENT_DATE)
+            SELECT COUNT(*) as total_used
+            FROM ai_usage_logs
+            WHERE user_id = $1
+              AND EXTRACT(MONTH FROM used_at) = EXTRACT(MONTH FROM CURRENT_DATE)
+              AND EXTRACT(YEAR FROM used_at) = EXTRACT(YEAR FROM CURRENT_DATE)
         `, [String(userId)]);
 
         const usedThisMonth = parseInt(usageQuery.rows[0].total_used) || 0;
         const freeRemaining = Math.max(0, 20 - usedThisMonth);
 
-        // 2. Fetch current wallet balance
-        const walletQuery = await db.query('SELECT balance FROM wallets WHERE user_id = $1', [userId]);
-        const walletBalance = walletQuery.rows.length > 0 ? parseFloat(walletQuery.rows[0].balance) : 0.00;
+        let walletBalance = 0.00;
+        try {
+            const walletQuery = await db.query('SELECT balance FROM wallets WHERE user_id = $1', [userId]);
+            if (walletQuery.rows.length > 0) {
+                walletBalance = parseFloat(walletQuery.rows[0].balance) || 0.00;
+            } else {
+                const walletQueryStr = await db.query('SELECT balance FROM wallets WHERE user_id::text = $1::text', [String(userId)]);
+                if (walletQueryStr.rows.length > 0) {
+                    walletBalance = parseFloat(walletQueryStr.rows[0].balance) || 0.00;
+                }
+            }
+        } catch (wErr) {
+            console.error('Wallet fetch error:', wErr);
+        }
 
         res.json({
             success: true,
@@ -156,12 +166,11 @@ router.post('/analyze', authenticateToken, async (req, res) => {
         return res.json({ success: true, analysis: analysisCache.get(cacheKey), charged: false });
     }
 
-    // --- QUOTA & WALLET VERIFICATION ---
     const usageQuery = await db.query(`
-        SELECT COUNT(*) as total_used FROM ai_usage_logs 
-        WHERE user_id = $1 
-        AND EXTRACT(MONTH FROM used_at) = EXTRACT(MONTH FROM CURRENT_DATE)
-        AND EXTRACT(YEAR FROM used_at) = EXTRACT(YEAR FROM CURRENT_DATE)
+        SELECT COUNT(*) as total_used FROM ai_usage_logs
+        WHERE user_id = $1
+          AND EXTRACT(MONTH FROM used_at) = EXTRACT(MONTH FROM CURRENT_DATE)
+          AND EXTRACT(YEAR FROM used_at) = EXTRACT(YEAR FROM CURRENT_DATE)
     `, [String(userId)]);
 
     const usedThisMonth = parseInt(usageQuery.rows[0].total_used) || 0;
@@ -197,7 +206,6 @@ Format your analysis covering:
     const result = await generateWithFailover(contents, 'gemini-3.8-flash');
     saveToCache(cacheKey, result.text);
 
-    // --- CHARGE WALLET & LOG USAGE (Only if successful) ---
     let charged = false;
     let chargeAmount = 0.00;
 
@@ -211,7 +219,7 @@ Format your analysis covering:
     return res.json({ success: true, analysis: result.text, charged });
 });
 
-// POST: Follow-up Chat & Voice (Charges 1 TK ONLY if it's a brand new discussion without a document)
+// POST: Follow-up Chat & Voice (Charges 1 TK ONLY if brand new discussion without document)
 router.post('/chat', authenticateToken, async (req, res) => {
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ success: false, message: 'Unauthorized session.' });
@@ -221,17 +229,15 @@ router.post('/chat', authenticateToken, async (req, res) => {
         return res.status(400).json({ success: false, message: 'Please provide a message or voice recording.' });
     }
 
-    // Check if this is a brand new case discussion (no document scanned first)
     const isNewDiscussion = !previousAnalysis || previousAnalysis.trim() === '';
     let isFree = true;
 
-    // --- QUOTA & WALLET VERIFICATION (Only charge for new discussions, follow-ups are free) ---
     if (isNewDiscussion) {
         const usageQuery = await db.query(`
-            SELECT COUNT(*) as total_used FROM ai_usage_logs 
-            WHERE user_id = $1 
-            AND EXTRACT(MONTH FROM used_at) = EXTRACT(MONTH FROM CURRENT_DATE)
-            AND EXTRACT(YEAR FROM used_at) = EXTRACT(YEAR FROM CURRENT_DATE)
+            SELECT COUNT(*) as total_used FROM ai_usage_logs
+            WHERE user_id = $1
+              AND EXTRACT(MONTH FROM used_at) = EXTRACT(MONTH FROM CURRENT_DATE)
+              AND EXTRACT(YEAR FROM used_at) = EXTRACT(YEAR FROM CURRENT_DATE)
         `, [String(userId)]);
 
         const usedThisMonth = parseInt(usageQuery.rows[0].total_used) || 0;
@@ -249,7 +255,7 @@ router.post('/chat', authenticateToken, async (req, res) => {
     const promptLang = language === 'en' ? 'English' : 'Bengali (বাংলা)';
     let combinedPrompt = `You are a senior legal assistant in Bangladesh. Respond strictly in ${promptLang}. 
 Do not use markdown asterisks (**) or hashes (#). 
-CRITICAL RULE: Do NOT use any religious, cultural, or formal greetings (like Assalamu Alaikum, Namaskar, Hello, or Greetings). Start your response directly with the legal advice or answer. Keep answers clear, direct, incloding section of law, and practical for an advocate.\n`;
+CRITICAL RULE: Do NOT use any religious, cultural, or formal greetings (like Assalamu Alaikum, Namaskar, Hello, or Greetings). Start your response directly with the legal advice or answer. Keep answers clear, direct, including section of law, and practical for an advocate.\n`;
 
     if (!isNewDiscussion) combinedPrompt += `\n--- CASE SUMMARY ---\n${previousAnalysis}\n--------------------\n`;
 
@@ -273,7 +279,6 @@ CRITICAL RULE: Do NOT use any religious, cultural, or formal greetings (like Ass
     const contents = [{ role: 'user', parts: userParts }];
     const result = await generateWithFailover(contents, 'gemini-3.5-flash-lite');
 
-    // --- CHARGE WALLET & LOG USAGE (Only if successful new discussion) ---
     let charged = false;
     if (isNewDiscussion) {
         let chargeAmount = 0.00;
