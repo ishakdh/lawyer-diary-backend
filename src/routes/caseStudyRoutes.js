@@ -256,7 +256,7 @@ router.post('/chat', authenticateToken, async (req, res) => {
 
         const promptLang = language === 'en' ? 'English' : 'Bengali (বাংলা)';
         let combinedPrompt = `You are a senior legal assistant in Bangladesh. Respond strictly in ${promptLang}. 
-CRITICAL RULE: Always Start first chat by the text "আসসালামু আলাইকুম".
+CRITICAL RULE: Always Start first chat by the text "আসসালামু আলাইকুম". After send first answer don't say the text "আসসালামু আলাইকুম" this text should be use one time for any single case study. 
 Start your response DIRECTLY with the legal advice or answer.
 Keep answers clear, direct, including section of law, and practical for an advocate.
 Do not use markdown asterisks (**) or hashes (#).\n`;
