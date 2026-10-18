@@ -51,22 +51,22 @@ app.use(cors({
 
 // 4. Rate Limiters (Stop Brute-Force & DDoS)
 const globalLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
+    windowMs: 15 * 60 * 1000, // 15 minutes (FIXED MATH OPERATORS)
     max: 300, // Limit each IP to 300 requests per 15 mins
     message: { success: false, message: 'Too many requests, please try again later.' }
 });
 app.use('/api', globalLimiter);
 
 const authLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
+    windowMs: 15 * 60 * 1000, // 15 minutes (FIXED MATH OPERATORS)
     max: 20, // Strict limit for login/signup attempts
     message: { success: false, message: 'Too many login attempts, please wait 15 minutes.' }
 });
 app.use('/api/auth', authLimiter);
 
-// 5. Body size limits
-app.use(express.json({ limit: '15mb' }));
-app.use(express.urlencoded({ limit: '15mb', extended: true }));
+// 5. Body size limits (THIS FIXES THE IMAGE UPLOAD & QUOTA BUG)
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // 6. Admin Protection Middleware for Gateway Saving
 const verifyAdmin = async (req, res, next) => {

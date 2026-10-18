@@ -108,7 +108,7 @@ async function generateWithFailover(contents, preferredModel = 'gemini-3.8-flash
     } catch (e) {}
 })();
 
-// GET: Fetch Quota and Wallet Balance
+// GET: Fetch Quota
 router.get('/quota', authenticateToken, async (req, res) => {
     const userId = req.user?.id;
     try {
@@ -121,23 +121,14 @@ router.get('/quota', authenticateToken, async (req, res) => {
         `, [String(userId)]);
 
         const usedThisMonth = parseInt(usageQuery.rows[0].total_used) || 0;
-        const freeRemaining = Math.max(0, 20 - usedThisMonth); // FIXED MINUS SIGN
+        const freeRemaining = Math.max(0, 20 - usedThisMonth);
 
+        // Fetch wallet balance directly from users table!
         let walletBalance = 0.00;
         try {
-            let walletQuery = await db.query('SELECT balance FROM wallets WHERE user_id = $1', [userId]);
-            if (walletQuery.rows.length > 0) {
-                walletBalance = parseFloat(walletQuery.rows[0].balance) || 0.00;
-            } else {
-                walletQuery = await db.query('SELECT balance FROM wallets WHERE user_id::text = $1::text', [String(userId)]);
-                if (walletQuery.rows.length > 0) {
-                    walletBalance = parseFloat(walletQuery.rows[0].balance) || 0.00;
-                } else {
-                    walletQuery = await db.query('SELECT balance FROM users WHERE id = $1 OR id::text = $2::text', [userId, String(userId)]);
-                    if (walletQuery.rows.length > 0 && walletQuery.rows[0].balance !== undefined) {
-                        walletBalance = parseFloat(walletQuery.rows[0].balance) || 0.00;
-                    }
-                }
+            const walletQuery = await db.query('SELECT wallet_balance FROM users WHERE id = $1 OR id::text = $2::text', [userId, String(userId)]);
+            if (walletQuery.rows.length > 0 && walletQuery.rows[0].wallet_balance !== null) {
+                walletBalance = parseFloat(walletQuery.rows[0].wallet_balance) || 0.00;
             }
         } catch (wErr) {
             console.error('Wallet fetch fallback error:', wErr.message);
@@ -182,8 +173,8 @@ router.post('/analyze', authenticateToken, async (req, res) => {
     const isFree = usedThisMonth < 20;
 
     if (!isFree) {
-        const walletQuery = await db.query('SELECT balance FROM wallets WHERE user_id = $1', [userId]);
-        const balance = walletQuery.rows.length > 0 ? parseFloat(walletQuery.rows[0].balance) : 0;
+        const walletQuery = await db.query('SELECT wallet_balance FROM users WHERE id = $1', [userId]);
+        const balance = walletQuery.rows.length > 0 ? parseFloat(walletQuery.rows[0].wallet_balance) : 0;
         if (balance < 1.00) {
             return res.status(402).json({ success: false, message: 'Free quota (20 scans) exceeded. Please top-up your wallet (1 TK required).' });
         }
@@ -213,15 +204,20 @@ Format your analysis covering:
     saveToCache(cacheKey, result.text);
 
     let charged = false;
-    let chargeAmount = "0.00"; // <--- Force it as a string decimal
+    let chargeAmount = "0.00";
 
     if (!isFree) {
-        await db.query('UPDATE wallets SET balance = balance - 1.00 WHERE user_id = $1', [userId]);
-        chargeAmount = "1.00"; // <--- Force it as a string decimal
-        charged = true;
-    }
+        await db.query('UPDATE users SET wallet_balance = wallet_balance - 1.00 WHERE id = $1 OR id::text = $2::text', [userId, String(userId)]);
 
-    // Explicitly cast the value to numeric to guarantee insertion success
+        chargeAmount = "1.00";
+        charged = true;
+
+        // Log transaction to wallet history so it shows up in dashboard
+        await db.query(
+            `INSERT INTO wallet_transactions (user_id, amount, transaction_type, description) VALUES ($1, $2, 'AI_SCAN', 'Paid AI Case Study')`,
+            [String(userId), -1.00]
+        ).catch(err => console.warn("Could not log AI wallet transaction"));
+    }
     await db.query('INSERT INTO ai_usage_logs (user_id, charged_amount) VALUES ($1, $2::numeric)', [String(userId), chargeAmount]).catch(err => console.error("USAGE LOG FAIL:", err));
 
     return res.json({ success: true, analysis: result.text, charged });
@@ -252,8 +248,8 @@ router.post('/chat', authenticateToken, async (req, res) => {
         isFree = usedThisMonth < 20;
 
         if (!isFree) {
-            const walletQuery = await db.query('SELECT balance FROM wallets WHERE user_id = $1', [userId]);
-            const balance = walletQuery.rows.length > 0 ? parseFloat(walletQuery.rows[0].balance) : 0;
+            const walletQuery = await db.query('SELECT wallet_balance FROM users WHERE id = $1', [userId]);
+            const balance = walletQuery.rows.length > 0 ? parseFloat(walletQuery.rows[0].wallet_balance) : 0;
             if (balance < 1.00) {
                 return res.status(402).json({ success: false, message: 'Free quota (20 cases) exceeded. Please top-up your wallet (1 TK required).' });
             }
@@ -261,8 +257,6 @@ router.post('/chat', authenticateToken, async (req, res) => {
     }
 
     const promptLang = language === 'en' ? 'English' : 'Bengali (বাংলা)';
-
-    // NEW, EXTREMELY STRICT ANTI-GREETING PROMPT
     let combinedPrompt = `You are a senior legal assistant in Bangladesh. Respond strictly in ${promptLang}. 
 CRITICAL RULE: Absolutely NO greetings. DO NOT say "নমস্কার", "আসসালামু আলাইকুম", "হ্যালো", or "Greetings". DO NOT address the user with polite phrases like "সিনিয়র আইনজীবী মহোদয়".
 Start your response DIRECTLY with the legal advice or answer.
@@ -293,13 +287,18 @@ Do not use markdown asterisks (**) or hashes (#).\n`;
 
     let charged = false;
     if (isNewDiscussion) {
-        let chargeAmount = "0.00"; // <--- Force string decimal
+        let chargeAmount = "0.00";
         if (!isFree) {
-            await db.query('UPDATE wallets SET balance = balance - 1.00 WHERE user_id = $1', [userId]);
-            chargeAmount = "1.00"; // <--- Force string decimal
+            await db.query('UPDATE users SET wallet_balance = wallet_balance - 1.00 WHERE id = $1 OR id::text = $2::text', [userId, String(userId)]);
+
+            chargeAmount = "1.00";
             charged = true;
+
+            await db.query(
+                `INSERT INTO wallet_transactions (user_id, amount, transaction_type, description) VALUES ($1, $2, 'AI_CHAT', 'Paid AI Case Discussion')`,
+                [String(userId), -1.00]
+            ).catch(err => console.warn("Could not log AI wallet transaction"));
         }
-        // Explicitly cast to numeric
         await db.query('INSERT INTO ai_usage_logs (user_id, charged_amount) VALUES ($1, $2::numeric)', [String(userId), chargeAmount]).catch(err => console.error("USAGE LOG FAIL:", err));
     }
 

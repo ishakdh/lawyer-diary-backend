@@ -9,7 +9,7 @@ cron.schedule('0 16 * * *', async () => {
         const query = `
             SELECT c.*, u.full_name AS lawyer_name
             FROM cases c
-                     JOIN users u ON c.chamber_owner_id = u.id
+                     JOIN users u ON c.chamber_owner_id::text = u.id::text
             WHERE DATE(c.next_hearing_date) = CURRENT_DATE + INTERVAL '2 days'
         `;
 
