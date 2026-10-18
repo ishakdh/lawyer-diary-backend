@@ -247,7 +247,9 @@ router.post('/chat', authenticateToken, async (req, res) => {
     }
 
     const promptLang = language === 'en' ? 'English' : 'Bengali (বাংলা)';
-    let combinedPrompt = `You are a senior legal assistant in Bangladesh. Respond strictly in ${promptLang}. Do not use markdown asterisks (**) or hashes (#). Keep answers clear, direct, and practical for an advocate.\n`;
+    let combinedPrompt = `You are a senior legal assistant in Bangladesh. Respond strictly in ${promptLang}. 
+Do not use markdown asterisks (**) or hashes (#). 
+CRITICAL RULE: Do NOT use any religious, cultural, or formal greetings (like Assalamu Alaikum, Namaskar, Hello, or Greetings). Start your response directly with the legal advice or answer. Keep answers clear, direct, incloding section of law, and practical for an advocate.\n`;
 
     if (!isNewDiscussion) combinedPrompt += `\n--- CASE SUMMARY ---\n${previousAnalysis}\n--------------------\n`;
 
