@@ -213,14 +213,16 @@ Format your analysis covering:
     saveToCache(cacheKey, result.text);
 
     let charged = false;
-    let chargeAmount = 0.00;
+    let chargeAmount = "0.00"; // <--- Force it as a string decimal
 
     if (!isFree) {
-        await db.query('UPDATE wallets SET balance = balance - 1.00 WHERE user_id = $1', [userId]); // FIXED MINUS SIGN
-        chargeAmount = 1.00;
+        await db.query('UPDATE wallets SET balance = balance - 1.00 WHERE user_id = $1', [userId]);
+        chargeAmount = "1.00"; // <--- Force it as a string decimal
         charged = true;
     }
-    await db.query('INSERT INTO ai_usage_logs (user_id, charged_amount) VALUES ($1, $2)', [String(userId), chargeAmount]).catch(console.error);
+
+    // Explicitly cast the value to numeric to guarantee insertion success
+    await db.query('INSERT INTO ai_usage_logs (user_id, charged_amount) VALUES ($1, $2::numeric)', [String(userId), chargeAmount]).catch(err => console.error("USAGE LOG FAIL:", err));
 
     return res.json({ success: true, analysis: result.text, charged });
 });
@@ -291,13 +293,14 @@ Do not use markdown asterisks (**) or hashes (#).\n`;
 
     let charged = false;
     if (isNewDiscussion) {
-        let chargeAmount = 0.00;
+        let chargeAmount = "0.00"; // <--- Force string decimal
         if (!isFree) {
-            await db.query('UPDATE wallets SET balance = balance - 1.00 WHERE user_id = $1', [userId]); // FIXED MINUS SIGN
-            chargeAmount = 1.00;
+            await db.query('UPDATE wallets SET balance = balance - 1.00 WHERE user_id = $1', [userId]);
+            chargeAmount = "1.00"; // <--- Force string decimal
             charged = true;
         }
-        await db.query('INSERT INTO ai_usage_logs (user_id, charged_amount) VALUES ($1, $2)', [String(userId), chargeAmount]).catch(console.error);
+        // Explicitly cast to numeric
+        await db.query('INSERT INTO ai_usage_logs (user_id, charged_amount) VALUES ($1, $2::numeric)', [String(userId), chargeAmount]).catch(err => console.error("USAGE LOG FAIL:", err));
     }
 
     return res.json({ success: true, reply: result.text, charged });
