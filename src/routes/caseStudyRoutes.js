@@ -11,7 +11,7 @@ try {
     authenticateToken = require('../middleware/auth');
 }
 
-// 1. COLLECT & SANITIZE ACTIVE KEYS FROM THE 30-KEY POOL
+// 1. COLLECT & SANITIZE ACTIVE KEYS
 const GEMINI_KEYS = [
     process.env.GEMINI_KEY_1, process.env.GEMINI_KEY_2, process.env.GEMINI_KEY_3,
     process.env.GEMINI_KEY_4, process.env.GEMINI_KEY_5, process.env.GEMINI_KEY_6,
@@ -54,7 +54,7 @@ function saveToCache(key, value) {
     analysisCache.set(key, value);
 }
 
-// 2. ULTRA-FAST FAILOVER ENGINE (Using Updated Gemini Models)
+// 2. ULTRA-FAST FAILOVER ENGINE
 const FREE_MODELS = ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-3.6-flash'];
 
 async function generateWithFailover(contents, preferredModel = 'gemini-3.8-flash') {
@@ -108,11 +108,10 @@ async function generateWithFailover(contents, preferredModel = 'gemini-3.8-flash
     } catch (e) {}
 })();
 
-// GET: Fetch Quota and Wallet Balance for the Current Calendar Month
+// GET: Fetch Quota and Wallet Balance
 router.get('/quota', authenticateToken, async (req, res) => {
     const userId = req.user?.id;
     try {
-        // 1. Calculate how many cases were analyzed THIS month
         const usageQuery = await db.query(`
             SELECT COUNT(*) as total_used
             FROM ai_usage_logs
@@ -122,22 +121,18 @@ router.get('/quota', authenticateToken, async (req, res) => {
         `, [String(userId)]);
 
         const usedThisMonth = parseInt(usageQuery.rows[0].total_used) || 0;
-        const freeRemaining = Math.max(0, 20 - usedThisMonth);
+        const freeRemaining = Math.max(0, 20 - usedThisMonth); // FIXED MINUS SIGN
 
-        // 2. Fetch current wallet balance safely checking common table structures
         let walletBalance = 0.00;
         try {
-            // Try matching user_id directly
             let walletQuery = await db.query('SELECT balance FROM wallets WHERE user_id = $1', [userId]);
             if (walletQuery.rows.length > 0) {
                 walletBalance = parseFloat(walletQuery.rows[0].balance) || 0.00;
             } else {
-                // Try matching as text/string
                 walletQuery = await db.query('SELECT balance FROM wallets WHERE user_id::text = $1::text', [String(userId)]);
                 if (walletQuery.rows.length > 0) {
                     walletBalance = parseFloat(walletQuery.rows[0].balance) || 0.00;
                 } else {
-                    // Try checking the users table if balance is stored directly on the user profile
                     walletQuery = await db.query('SELECT balance FROM users WHERE id = $1 OR id::text = $2::text', [userId, String(userId)]);
                     if (walletQuery.rows.length > 0 && walletQuery.rows[0].balance !== undefined) {
                         walletBalance = parseFloat(walletQuery.rows[0].balance) || 0.00;
@@ -160,7 +155,7 @@ router.get('/quota', authenticateToken, async (req, res) => {
     }
 });
 
-// POST: Analyze Document Images (Checks 20-limit and charges 1 TK if exceeded)
+// POST: Analyze Document Images
 router.post('/analyze', authenticateToken, async (req, res) => {
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ success: false, message: 'Unauthorized session.' });
@@ -196,6 +191,7 @@ router.post('/analyze', authenticateToken, async (req, res) => {
 
     const legalPrompt = `You are a senior legal research assistant in Bangladesh analyzing legal documents. Include specific legal Section names and numbers.
 Review the provided document image(s) thoroughly and formulate your response strictly in ${promptLang}.
+CRITICAL RULE: DO NOT use any greetings. DO NOT say "নমস্কার", "আসসালামু আলাইকুম", or "Hello". Start directly with the analysis.
 CRITICAL FORMATTING RULES:
 1. Deliver your response PARAGRAPH BY PARAGRAPH with double line breaks between them.
 2. Use clear, UPPERCASE HEADINGS. DO NOT use markdown asterisks (**) or hashes (#).
@@ -220,7 +216,7 @@ Format your analysis covering:
     let chargeAmount = 0.00;
 
     if (!isFree) {
-        await db.query('UPDATE wallets SET balance = balance - 1.00 WHERE user_id = $1', [userId]);
+        await db.query('UPDATE wallets SET balance = balance - 1.00 WHERE user_id = $1', [userId]); // FIXED MINUS SIGN
         chargeAmount = 1.00;
         charged = true;
     }
@@ -229,7 +225,7 @@ Format your analysis covering:
     return res.json({ success: true, analysis: result.text, charged });
 });
 
-// POST: Follow-up Chat & Voice (Charges 1 TK ONLY if brand new discussion without document)
+// POST: Follow-up Chat & Voice
 router.post('/chat', authenticateToken, async (req, res) => {
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ success: false, message: 'Unauthorized session.' });
@@ -263,9 +259,13 @@ router.post('/chat', authenticateToken, async (req, res) => {
     }
 
     const promptLang = language === 'en' ? 'English' : 'Bengali (বাংলা)';
+
+    // NEW, EXTREMELY STRICT ANTI-GREETING PROMPT
     let combinedPrompt = `You are a senior legal assistant in Bangladesh. Respond strictly in ${promptLang}. 
-Do not use markdown asterisks (**) or hashes (#). 
-CRITICAL RULE: Do NOT use any religious, cultural, or formal greetings (like Assalamu Alaikum, Namaskar, Hello, or Greetings). Start your response directly with the legal advice or answer. Keep answers clear, direct, including section of law, and practical for an advocate.\n`;
+CRITICAL RULE: Absolutely NO greetings. DO NOT say "নমস্কার", "আসসালামু আলাইকুম", "হ্যালো", or "Greetings". DO NOT address the user with polite phrases like "সিনিয়র আইনজীবী মহোদয়".
+Start your response DIRECTLY with the legal advice or answer.
+Keep answers clear, direct, including section of law, and practical for an advocate.
+Do not use markdown asterisks (**) or hashes (#).\n`;
 
     if (!isNewDiscussion) combinedPrompt += `\n--- CASE SUMMARY ---\n${previousAnalysis}\n--------------------\n`;
 
@@ -293,7 +293,7 @@ CRITICAL RULE: Do NOT use any religious, cultural, or formal greetings (like Ass
     if (isNewDiscussion) {
         let chargeAmount = 0.00;
         if (!isFree) {
-            await db.query('UPDATE wallets SET balance = balance - 1.00 WHERE user_id = $1', [userId]);
+            await db.query('UPDATE wallets SET balance = balance - 1.00 WHERE user_id = $1', [userId]); // FIXED MINUS SIGN
             chargeAmount = 1.00;
             charged = true;
         }
