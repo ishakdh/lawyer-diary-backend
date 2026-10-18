@@ -30,8 +30,11 @@ pool.on('error', (err) => {
     process.exit(-1);
 });
 
-// Initialize Users Table (if it doesn't exist) and add columns for Staff support
-await pool.query(`
+// Wrap database initialization in an async function to safely use await
+(async () => {
+    try {
+        // Initialize Users Table (if it doesn't exist) and add columns for Staff support
+        await pool.query(`
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
                 full_name VARCHAR(255) NOT NULL,
@@ -51,17 +54,15 @@ await pool.query(`
             );
         `);
 
-// Ensure the role and lawyer_id columns exist (if the table was already created earlier)
-try {
-    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(20) DEFAULT 'lawyer';`);
-    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS lawyer_id INTEGER;`);
-} catch (e) {
-    // Columns likely already exist, safely ignore
-}
+        // Ensure the role and lawyer_id columns exist (if the table was already created earlier)
+        try {
+            await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(20) DEFAULT 'lawyer';`);
+            await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS lawyer_id INTEGER;`);
+        } catch (e) {
+            // Columns likely already exist, safely ignore
+        }
 
-// Automatically create the cases table if it does not exist
-const initializeDatabase = async () => {
-    try {
+        // Automatically create the cases table if it does not exist
         await pool.query(`
             CREATE TABLE IF NOT EXISTS cases (
                 id SERIAL PRIMARY KEY,
@@ -85,11 +86,9 @@ const initializeDatabase = async () => {
         `);
         console.log('Cases table verified/created successfully.');
     } catch (err) {
-        console.error('Error creating cases table:', err.message);
+        console.error('Database initialization error:', err.message);
     }
-};
-
-initializeDatabase();
+})();
 
 module.exports = {
     query: (text, params) => pool.query(text, params),
