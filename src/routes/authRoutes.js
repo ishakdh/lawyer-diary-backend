@@ -22,11 +22,31 @@ router.post('/login', async (req, res) => {
         if (!isMatch) return res.status(400).json({ success: false, message: 'Invalid phone number or password.' });
 
         await db.query('UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = $1', [user.id]);
-        await db.query('INSERT INTO activity_logs (user_id, action_type, description) VALUES ($1, $2, $3)', [user.id, 'LOGIN', 'Lawyer signed into the platform']);
+        await db.query('INSERT INTO activity_logs (user_id, action_type, description) VALUES ($1, $2, $3)', [user.id, 'LOGIN', `${user.role === 'staff' ? 'Staff' : 'Lawyer'} signed into the platform`]);
 
-        const token = jwt.sign({ id: user.id, phone: user.phone_number, is_admin: user.is_admin || false }, JWT_SECRET, { expiresIn: '7d' });
+        // CRITICAL FIX: If it's a staff member, they use their lawyer's ID to fetch cases!
+        const effectiveId = user.role === 'staff' ? user.lawyer_id : user.id;
 
-        res.json({ success: true, message: 'Login successful!', token, user: { id: user.id, full_name: user.full_name, phone: user.phone_number, is_admin: user.is_admin } });
+        const token = jwt.sign({
+            id: effectiveId, // Staff acts on behalf of the Lawyer
+            actual_user_id: user.id, // Keep their real ID just in case
+            role: user.role,
+            phone: user.phone_number,
+            is_admin: user.is_admin || false
+        }, JWT_SECRET, { expiresIn: '7d' });
+
+        res.json({
+            success: true,
+            message: 'Login successful!',
+            token,
+            user: {
+                id: effectiveId,
+                full_name: user.full_name,
+                phone: user.phone_number,
+                role: user.role,
+                is_admin: user.is_admin
+            }
+        });
     } catch (error) {
         res.status(500).json({ success: false, message: 'Server error during login.' });
     }
@@ -161,6 +181,38 @@ router.post('/reset-password', async (req, res) => {
 
         res.json({ success: true, message: 'Password updated successfully.' });
     } catch (err) { res.status(500).json({ success: false, message: 'Server error resetting password.' }); }
+});
+
+// POST: Add a new Staff Member/Clerk (Only a Lawyer can do this)
+router.post('/add-staff', authenticateToken, async (req, res) => {
+    const lawyerId = req.user.id;
+    const { staff_name, staff_phone, staff_password } = req.body;
+
+    if (!staff_name || !staff_phone || !staff_password || staff_password.length < 4) {
+        return res.status(400).json({ success: false, message: 'Please provide name, phone, and a password (min 4 chars).' });
+    }
+
+    try {
+        // Ensure the phone number isn't already used by another lawyer or staff
+        const userExists = await db.query('SELECT * FROM users WHERE phone_number = $1', [staff_phone]);
+        if (userExists.rows.length > 0) {
+            return res.status(400).json({ success: false, message: 'This phone number is already registered.' });
+        }
+
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(staff_password, salt);
+
+        // Insert the staff member, linking them to the lawyer
+        await db.query(`
+            INSERT INTO users (full_name, phone_number, password, role, lawyer_id, trial_ends_at)
+            VALUES ($1, $2, $3, 'staff', $4, CURRENT_TIMESTAMP + INTERVAL '10 years')
+        `, [staff_name, staff_phone, hashedPassword, lawyerId]);
+
+        res.json({ success: true, message: 'Staff ID created successfully. They can now log in.' });
+    } catch (error) {
+        console.error('Add Staff Error:', error);
+        res.status(500).json({ success: false, message: 'Server error creating staff ID.' });
+    }
 });
 
 module.exports = router;
