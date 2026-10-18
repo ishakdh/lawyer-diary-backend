@@ -11,6 +11,25 @@ require('./cron/reminders');
 require('./cron/subscriptions');
 
 const db = require('./config/db');
+// Ensure the AI usage logs table exists on startup
+const ensureDatabaseTables = async () => {
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS ai_usage_logs (
+                id SERIAL PRIMARY KEY,
+                user_id VARCHAR(255),
+                used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                charged_amount NUMERIC(10,2) DEFAULT 0.00
+            );
+        `);
+        console.log('AI Usage Logs table verified/created successfully.');
+    } catch (err) {
+        console.error('Table creation warning:', err.message);
+    }
+};
+
+// Execute table creation
+ensureDatabaseTables();
 
 // Import Routes
 const authRoutes = require('./routes/authRoutes');
