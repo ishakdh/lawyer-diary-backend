@@ -112,6 +112,7 @@ async function generateWithFailover(contents, preferredModel = 'gemini-3.8-flash
 router.get('/quota', authenticateToken, async (req, res) => {
     const userId = req.user?.id;
     try {
+        // 1. Calculate how many cases were analyzed THIS month
         const usageQuery = await db.query(`
             SELECT COUNT(*) as total_used
             FROM ai_usage_logs
@@ -123,19 +124,28 @@ router.get('/quota', authenticateToken, async (req, res) => {
         const usedThisMonth = parseInt(usageQuery.rows[0].total_used) || 0;
         const freeRemaining = Math.max(0, 20 - usedThisMonth);
 
+        // 2. Fetch current wallet balance safely checking common table structures
         let walletBalance = 0.00;
         try {
-            const walletQuery = await db.query('SELECT balance FROM wallets WHERE user_id = $1', [userId]);
+            // Try matching user_id directly
+            let walletQuery = await db.query('SELECT balance FROM wallets WHERE user_id = $1', [userId]);
             if (walletQuery.rows.length > 0) {
                 walletBalance = parseFloat(walletQuery.rows[0].balance) || 0.00;
             } else {
-                const walletQueryStr = await db.query('SELECT balance FROM wallets WHERE user_id::text = $1::text', [String(userId)]);
-                if (walletQueryStr.rows.length > 0) {
-                    walletBalance = parseFloat(walletQueryStr.rows[0].balance) || 0.00;
+                // Try matching as text/string
+                walletQuery = await db.query('SELECT balance FROM wallets WHERE user_id::text = $1::text', [String(userId)]);
+                if (walletQuery.rows.length > 0) {
+                    walletBalance = parseFloat(walletQuery.rows[0].balance) || 0.00;
+                } else {
+                    // Try checking the users table if balance is stored directly on the user profile
+                    walletQuery = await db.query('SELECT balance FROM users WHERE id = $1 OR id::text = $2::text', [userId, String(userId)]);
+                    if (walletQuery.rows.length > 0 && walletQuery.rows[0].balance !== undefined) {
+                        walletBalance = parseFloat(walletQuery.rows[0].balance) || 0.00;
+                    }
                 }
             }
         } catch (wErr) {
-            console.error('Wallet fetch error:', wErr);
+            console.error('Wallet fetch fallback error:', wErr.message);
         }
 
         res.json({
