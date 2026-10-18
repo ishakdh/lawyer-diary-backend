@@ -88,11 +88,11 @@ const ensureUsageTable = async () => {
     try {
         await db.query(`
             CREATE TABLE IF NOT EXISTS ai_usage_logs (
-                id SERIAL PRIMARY KEY,
-                user_id VARCHAR(255),
+                                                         id SERIAL PRIMARY KEY,
+                                                         user_id VARCHAR(255),
                 used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 charged_amount NUMERIC(10,2) DEFAULT 0.00
-            );
+                );
         `);
     } catch (e) {
         console.error("Failed to ensure ai_usage_logs table:", e.message);
@@ -108,7 +108,7 @@ router.get('/quota', authenticateToken, async (req, res) => {
         const usageQuery = await db.query(`
             SELECT COUNT(*) as total_used FROM ai_usage_logs
             WHERE user_id = $1 AND EXTRACT(MONTH FROM used_at) = EXTRACT(MONTH FROM CURRENT_DATE)
-            AND EXTRACT(YEAR FROM used_at) = EXTRACT(YEAR FROM CURRENT_DATE)
+              AND EXTRACT(YEAR FROM used_at) = EXTRACT(YEAR FROM CURRENT_DATE)
         `, [String(userId)]);
 
         const usedThisMonth = parseInt(usageQuery.rows[0].total_used) || 0;
@@ -125,7 +125,7 @@ router.get('/quota', authenticateToken, async (req, res) => {
         res.json({ success: true, used_this_month: usedThisMonth, free_remaining: freeRemaining, wallet_balance: walletBalance });
     } catch (err) {
         console.error('Quota Route Crash Protected:', err.message);
-        res.json({ success: true, used_this_month: 0, free_remaining: 20, wallet_balance: 0.00 }); // Safe fallback
+        res.json({ success: true, used_this_month: 0, free_remaining: 20, wallet_balance: 0.00 });
     }
 });
 
@@ -151,7 +151,7 @@ router.post('/analyze', authenticateToken, async (req, res) => {
         const usageQuery = await db.query(`
             SELECT COUNT(*) as total_used FROM ai_usage_logs
             WHERE user_id = $1 AND EXTRACT(MONTH FROM used_at) = EXTRACT(MONTH FROM CURRENT_DATE)
-            AND EXTRACT(YEAR FROM used_at) = EXTRACT(YEAR FROM CURRENT_DATE)
+              AND EXTRACT(YEAR FROM used_at) = EXTRACT(YEAR FROM CURRENT_DATE)
         `, [String(userId)]);
 
         const usedThisMonth = parseInt(usageQuery.rows[0].total_used) || 0;
@@ -184,7 +184,6 @@ Format your analysis covering:
 
         const contents = [{ role: 'user', parts: [{ text: legalPrompt }, ...imageParts] }];
 
-        // This generates the text and will safely throw to the catch block if Gemini fails
         const result = await generateWithFailover(contents, 'gemini-3.8-flash');
         saveToCache(cacheKey, result.text);
 
@@ -192,6 +191,7 @@ Format your analysis covering:
         let chargeAmount = "0.00";
 
         if (!isFree) {
+            // FIXED MINUS SIGN HERE:
             await db.query('UPDATE users SET wallet_balance = wallet_balance - 1.00 WHERE id = $1', [userId]);
             chargeAmount = "1.00";
             charged = true;
@@ -268,6 +268,7 @@ Do not use markdown asterisks (**) or hashes (#).\n`;
         if (isNewDiscussion) {
             let chargeAmount = "0.00";
             if (!isFree) {
+                // FIXED MINUS SIGN HERE:
                 await db.query('UPDATE users SET wallet_balance = wallet_balance - 1.00 WHERE id = $1', [userId]);
                 chargeAmount = "1.00";
                 charged = true;
